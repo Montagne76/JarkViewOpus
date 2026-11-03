@@ -8,11 +8,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure (x64)
+      - name: Restore vendored static libs
+        id: libs
+        uses: actions/cache@v4
+        with:
+          path: static_lib.7z
+          key: jark-static-lib-v2.0-2026-10
+
+      - name: Download static libs (jark006/JarkViewer release static_lib)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path static_lib.7z)) {
+            Write-Host "cache miss, downloading..."
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri "https://github.com/jark006/JarkViewer/releases/download/static_lib/JarkViewer_static_lib_v2.0%2B.7z" -OutFile static_lib.7z -MaximumRetryCount 5 -RetryIntervalSec 10
+          }
+          Get-Item static_lib.7z | Select-Object Name, Length
+
+      - name: Extract static libs
         shell: cmd
         run: |
-          "C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          cmake -B build -A x64
+          if not exist "C:\Program Files\7-Zip\7z.exe" (echo 7z not found & exit /b 1)
+          "C:\Program Files\7-Zip\7z.exe" x static_lib.7z -ojark -y
+          dir jark
+
+      - name: Configure (x64)
+        run: cmake -B build -A x64
 
       - name: Build Release
         run: cmake --build build --config Release

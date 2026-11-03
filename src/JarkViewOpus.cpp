@@ -1,18 +1,22 @@
 /*
    JarkViewOpus - Directory Opus Viewer Plugin
-   Phase 0 skeleton: HEIC/HEIF/AVIF/JXL identification + WIC-based decode.
+   Phase 1: decode via the JarkViewer core (jark006/JarkViewer, GPL-3.0).
 
-   Decode pipeline will be replaced by the JarkViewer core (GPL-3.0) in Phase 1.
+   Identify decodes the image once (result cached in the ImageAsset LRU);
+   LoadBitmap then hits the cache, so each file is decoded exactly once.
+
    Plugin API: Directory Opus Viewer Plugin SDK (c) GP Software.
-
    License: GPL-3.0-or-later
 */
 
 #include <windows.h>
 #include <objidl.h>
-#include <wincodec.h>
 #include <cstring>
 #include <algorithm>
+#include <memory>
+
+#include "../jark/include/ImageDatabase.h"
+#include "../jark/include/FormatSniffer.h"
 
 #include "../sdk/DirectoryOpusViewerPlugins.h"
 
@@ -25,254 +29,176 @@ static const GUID GUIDPlugin_JarkViewOpus =
 { 0x9a7b3f42, 0x6c1d, 0x4e5a, { 0x8f, 0x2b, 0x3d, 0x9e, 0x1c, 0x7a, 0x5b, 0x60 } };
 
 static const wchar_t kPluginName[]        = L"JarkViewOpus";
-static const wchar_t kPluginDescription[] = L"Modern image formats (HEIC/AVIF/JPEG XL) - JarkViewOpus";
+static const wchar_t kPluginDescription[] = L"Modern image formats via JarkViewer core (HEIC/AVIF/JXL) - JarkViewOpus";
 static const wchar_t kPluginCopyright[]   = L"GPL-3.0-or-later";
 static const wchar_t kPluginURL[]         = L"https://github.com/Montagne76/JarkViewOpus";
 
-// Phase 0: WIC-only formats. (.webp intentionally omitted: Opus 13 handles
-// WebP internally and WIC WebP needs extra video extensions anyway.)
+// Claimed extensions. (.webp intentionally omitted: Opus 13 handles it internally.)
 static const wchar_t kHandleExts[] = L".heic;.heif;.avif;.avifs;.jxl";
 
 static HINSTANCE       g_hModuleInstance = nullptr;
 static CRITICAL_SECTION g_cs;
 static int             g_refCount = 0;
 
-// Minimal local helpers (no dependency on Leo's common code).
-struct LeoScopeLock
-{
-    LeoScopeLock()  { EnterCriticalSection(&g_cs); }
-    ~LeoScopeLock() { LeaveCriticalSection(&g_cs); }
-};
-
 static void LeoStringCopy(LPWSTR dst, UINT cchMax, const wchar_t* src)
 {
     if (dst && cchMax > 0)
-    {
         wcsncpy_s(dst, cchMax, src ? src : L"", _TRUNCATE);
+}
+
+// ---------------------------------------------------------------------------
+// JarkViewer core singleton
+// ---------------------------------------------------------------------------
+
+// No preload worker thread (a background decoder thread inside the DOpus
+// process is not worth the shutdown risk; DOpus drives file switching
+// synchronously anyway). LRU budget keeps repeat views instant.
+static jark::ImageDatabase* g_db = nullptr;
+
+static jark::ImageDatabase* GetDB()
+{
+    EnterCriticalSection(&g_cs);
+    if (!g_db)
+    {
+        g_db = new (std::nothrow) jark::ImageDatabase(false /*startPreloadWorker*/);
+        if (g_db)
+            g_db->setByteBudget(256ull * 1024 * 1024);
+    }
+    LeaveCriticalSection(&g_cs);
+    return g_db;
+}
+
+static void DestroyDB()
+{
+    EnterCriticalSection(&g_cs);
+    delete g_db;
+    g_db = nullptr;
+    LeaveCriticalSection(&g_cs);
+}
+
+// Decode (or fetch from cache) one file. Returns nullptr on failure.
+static std::shared_ptr<jark::ImageAsset> LoadAsset(const std::wstring& path)
+{
+    jark::ImageDatabase* db = GetDB();
+    if (!db)
+        return nullptr;
+    try
+    {
+        return db->getDataPtr(path);
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+
+static bool IsSupportedSniff(jark::FileFormat ff)
+{
+    switch (ff)
+    {
+    case jark::FileFormat::Heif:
+    case jark::FileFormat::Avif:
+    case jark::FileFormat::Jxl:
+        return true;
+    default:
+        return false;
     }
 }
 
 // ---------------------------------------------------------------------------
-// Format sniffing (magic bytes; logic mirrors JarkViewer's FormatSniffer)
+// cv::Mat -> 32bpp top-down DIB (BGRA)
 // ---------------------------------------------------------------------------
 
-enum class Fmt { None, Heif, Avif, Jxl, WebP };
+// Preview cap: images larger than this are downscaled during the Mat->DIB
+// conversion so DOpus's fit-to-window scaling has far fewer pixels to stretch.
+static const int kMaxDecodeDim = 4096;
 
-static Fmt SniffFormat(const uint8_t* d, size_t n)
+static HBITMAP MatToDIB(const cv::Mat& srcIn, LPSIZE lpszSize, LPVIEWERPLUGINFILEINFOW lpVPFileInfo)
 {
-    // WebP: RIFF....WEBP
-    if (n >= 12 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "WEBP", 4))
-        return Fmt::WebP;
+    if (srcIn.empty())
+        return nullptr;
 
-    // JPEG XL naked codestream
-    if (n >= 2 && d[0] == 0xFF && d[1] == 0x0A)
-        return Fmt::Jxl;
+    cv::Mat src = srcIn;
 
-    // ISO BMFF family: scan for the 'ftyp' box within the first 96 bytes,
-    // then match compatible brands (vendors may add extra leading boxes).
-    const size_t limit = std::min<size_t>(n, 96);
-    for (size_t off = 0; off + 12 <= limit; ++off)
+    if (std::max(src.cols, src.rows) > kMaxDecodeDim)
     {
-        if (memcmp(d + off + 4, "ftyp", 4) != 0)
-            continue;
+        const double s = static_cast<double>(kMaxDecodeDim) /
+                         static_cast<double>(std::max(src.cols, src.rows));
+        cv::resize(src, src, cv::Size(), s, s, cv::INTER_AREA);
+    }
 
-        uint32_t boxSize = (static_cast<uint32_t>(d[off]) << 24) |
-                           (static_cast<uint32_t>(d[off + 1]) << 16) |
-                           (static_cast<uint32_t>(d[off + 2]) << 8) |
-                            static_cast<uint32_t>(d[off + 3]);
-        if (boxSize < 16)
-            boxSize = 16;
-
-        const size_t brandEnd = std::min({ off + boxSize, n, limit });
-        for (size_t b = off + 8; b + 4 <= brandEnd; b += 4)
+    // Normalize to 8-bit BGRA.
+    cv::Mat bgra;
+    try
+    {
+        if (src.depth() != CV_8U)
         {
-            if (!memcmp(d + b, "avif", 4) || !memcmp(d + b, "avis", 4))
-                return Fmt::Avif;
-            if (!memcmp(d + b, "jxl ", 4))
-                return Fmt::Jxl;
-            static const char* kHeifBrands[] = {
-                "heic", "heix", "hevc", "hevx", "heim", "heis",
-                "hevm", "hevs", "heif", "mif1", "msf1" };
-            for (const char* brand : kHeifBrands)
-                if (!memcmp(d + b, brand, 4))
-                    return Fmt::Heif;
+            cv::Mat tmp;
+            double scale = 1.0;
+            if (src.depth() == CV_16U)      scale = 1.0 / 257.0;
+            else if (src.depth() == CV_32F || src.depth() == CV_64F) scale = 255.0;
+            src.convertTo(tmp, CV_8U, scale);
+            src = tmp;
         }
-        break; // only the leading 'ftyp' box is relevant
+        switch (src.channels())
+        {
+        case 4: bgra = src; break;
+        case 3: cv::cvtColor(src, bgra, cv::COLOR_BGR2BGRA); break;
+        case 1: cv::cvtColor(src, bgra, cv::COLOR_GRAY2BGRA); break;
+        default:
+        {
+            cv::Mat tmp;
+            cv::cvtColor(src, tmp, cv::COLOR_BGR2BGRA);
+            bgra = tmp;
+            break;
+        }
+        }
     }
-    return Fmt::None;
-}
-
-// ---------------------------------------------------------------------------
-// WIC helpers
-// ---------------------------------------------------------------------------
-
-// Cached WIC factory: CoCreateInstance per file is measurably slow on every
-// image switch. Created lazily, released when the last viewer instance goes.
-static IWICImagingFactory* g_wicFactory = nullptr;
-
-static IWICImagingFactory* GetWICFactory()
-{
-    LeoScopeLock lock;
-    if (!g_wicFactory)
+    catch (...)
     {
-        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                    IID_PPV_ARGS(&g_wicFactory))))
-            g_wicFactory = nullptr;
+        return nullptr;
     }
-    return g_wicFactory; // caller must not Release; lifetime managed here
-}
 
-// Preview cap: images larger than this are downscaled during decode. A 50MP
-// image would otherwise become a ~200MB DIB that DOpus then shrinks for
-// display, which is the main reason switching files felt slow.
-static const UINT kMaxDecodeDim = 4096;
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = bgra.cols;
+    bmi.bmiHeader.biHeight      = -bgra.rows; // top-down
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
 
-struct ScopedCOM
-{
-    HRESULT hr;
-    explicit ScopedCOM(DWORD model = COINIT_MULTITHREADED)
-        : hr(CoInitializeEx(nullptr, model)) {} // RPC_E_CHANGED_MODE is tolerated
-    ~ScopedCOM() { if (SUCCEEDED(hr)) CoUninitialize(); }
-    bool ok() const { return SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE; }
-};
-
-static bool PixelFormatHasAlpha(REFGUID fmt)
-{
-    return fmt == GUID_WICPixelFormat32bppBGRA || fmt == GUID_WICPixelFormat32bppRGBA ||
-           fmt == GUID_WICPixelFormat32bppPRGBA || fmt == GUID_WICPixelFormat32bppPBGRA ||
-           fmt == GUID_WICPixelFormat64bppRGBA || fmt == GUID_WICPixelFormat64bppBGRA ||
-           fmt == GUID_WICPixelFormat64bppPRGBA || fmt == GUID_WICPixelFormat64bppPBGRA ||
-           fmt == GUID_WICPixelFormat40bppCMYKAlpha || fmt == GUID_WICPixelFormat80bppCMYKAlpha;
-}
-
-// Decode the first frame of a decoder into a 32bpp top-down DIB.
-// Images larger than kMaxDecodeDim are downscaled with WICBitmapInterpolationModeFant
-// during decode, so the DIB stays small and DOpus's own fit-to-window scaling has
-// far fewer pixels to stretch.
-static HBITMAP DecodeFirstFrame(IWICImagingFactory* factory, IWICBitmapDecoder* decoder,
-                                LPSIZE lpszSize, LPVIEWERPLUGINFILEINFOW lpVPFileInfo)
-{
-    IWICBitmapFrameDecode* frame = nullptr;
-    IWICBitmapScaler* scaler = nullptr;
-    IWICFormatConverter* converter = nullptr;
-    HBITMAP hBitmap = nullptr;
-    HDC hdc = nullptr;
+    HDC hdc = CreateCompatibleDC(nullptr);
+    if (!hdc)
+        return nullptr;
     void* bits = nullptr;
-
-    do
+    HBITMAP hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    DeleteDC(hdc);
+    if (!hBitmap || !bits)
     {
-        if (FAILED(decoder->GetFrame(0, &frame)))
-            break;
-
-        GUID srcFmt = {};
-        BOOL hasAlpha = FALSE;
-        if (SUCCEEDED(frame->GetPixelFormat(&srcFmt)))
-            hasAlpha = PixelFormatHasAlpha(srcFmt);
-
-        UINT w = 0, h = 0;
-        if (FAILED(frame->GetSize(&w, &h)) || w == 0 || h == 0)
-            break;
-
-        const UINT origW = w, origH = h;
-
-        // Downscale huge images during decode (keep aspect ratio).
-        IWICBitmapSource* source = frame;
-        const UINT longest = (w > h) ? w : h;
-        if (longest > kMaxDecodeDim)
-        {
-            UINT tw = w, th = h;
-            if (w >= h)
-            {
-                tw = kMaxDecodeDim;
-                th = (UINT)((static_cast<ULONGLONG>(h) * kMaxDecodeDim + w / 2) / w);
-            }
-            else
-            {
-                th = kMaxDecodeDim;
-                tw = (UINT)((static_cast<ULONGLONG>(w) * kMaxDecodeDim + h / 2) / h);
-            }
-            if (tw >= 1 && th >= 1 &&
-                SUCCEEDED(factory->CreateBitmapScaler(&scaler)) &&
-                SUCCEEDED(scaler->Initialize(frame, tw, th, WICBitmapInterpolationModeFant)))
-            {
-                source = scaler;
-                w = tw;
-                h = th;
-            }
-            // If the scaler could not be created, fall back to full size decode.
-        }
-
-        if (FAILED(factory->CreateFormatConverter(&converter)))
-            break;
-        if (FAILED(converter->Initialize(source, GUID_WICPixelFormat32bppBGRA,
-                                         WICBitmapDitherTypeNone, nullptr, 0.0,
-                                         WICBitmapPaletteTypeCustom)))
-            break;
-
-        BITMAPINFO bmi = {};
-        bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth       = static_cast<LONG>(w);
-        bmi.bmiHeader.biHeight      = -static_cast<LONG>(h); // top-down
-        bmi.bmiHeader.biPlanes      = 1;
-        bmi.bmiHeader.biBitCount    = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        hdc = CreateCompatibleDC(nullptr);
-        if (!hdc)
-            break;
-        hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-        if (!hBitmap || !bits)
-            break;
-
-        const size_t rowBytes = static_cast<size_t>(w) * 4;
-        if (FAILED(converter->CopyPixels(nullptr, static_cast<UINT>(rowBytes),
-                                         static_cast<UINT>(rowBytes * h),
-                                         static_cast<BYTE*>(bits))))
-        {
-            DeleteObject(hBitmap);
-            hBitmap = nullptr;
-            break;
-        }
-
-        if (lpszSize)
-        {
-            lpszSize->cx = static_cast<LONG>(w);
-            lpszSize->cy = static_cast<LONG>(h);
-        }
-        if (lpVPFileInfo && hasAlpha)
-            lpVPFileInfo->dwFlags |= DVPFIF_HasAlphaChannel;
-    } while (false);
-
-    if (hdc)
-        DeleteDC(hdc);
-    if (converter)
-        converter->Release();
-    if (scaler)
-        scaler->Release();
-    if (frame)
-        frame->Release();
-    return hBitmap;
-}
-
-static bool WicCanDecodeFile(LPCWSTR path, IWICImagingFactory* factory, SIZE* sizeOut)
-{
-    IWICBitmapDecoder* decoder = nullptr;
-    IWICBitmapFrameDecode* frame = nullptr;
-    bool ok = false;
-    if (SUCCEEDED(factory->CreateDecoderFromFilename(path, nullptr, GENERIC_READ,
-                                                     WICDecodeMetadataCacheOnDemand, &decoder)) &&
-        SUCCEEDED(decoder->GetFrame(0, &frame)))
-    {
-        UINT w = 0, h = 0;
-        if (SUCCEEDED(frame->GetSize(&w, &h)) && w > 0 && h > 0)
-        {
-            if (sizeOut) { sizeOut->cx = static_cast<LONG>(w); sizeOut->cy = static_cast<LONG>(h); }
-            ok = true;
-        }
+        DeleteObject(hBitmap);
+        return nullptr;
     }
-    if (frame) frame->Release();
-    if (decoder) decoder->Release();
-    return ok;
+
+    const size_t dstStride = static_cast<size_t>(bgra.cols) * 4;
+    if (bgra.isContinuous() && static_cast<size_t>(bgra.step) == dstStride)
+    {
+        memcpy(bits, bgra.data, dstStride * static_cast<size_t>(bgra.rows));
+    }
+    else
+    {
+        uint8_t* dst = static_cast<uint8_t*>(bits);
+        for (int y = 0; y < bgra.rows; ++y)
+            memcpy(dst + dstStride * y, bgra.ptr(y), dstStride);
+    }
+
+    if (lpszSize)
+    {
+        lpszSize->cx = bgra.cols;
+        lpszSize->cy = bgra.rows;
+    }
+    if (lpVPFileInfo && srcIn.channels() == 4)
+        lpVPFileInfo->dwFlags |= DVPFIF_HasAlphaChannel;
+    return hBitmap;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,21 +226,20 @@ extern "C" {
 
 __declspec(dllexport) BOOL DVP_InitEx(LPDVPINITEXDATA /*pInitExData*/)
 {
-    LeoScopeLock lock;
+    EnterCriticalSection(&g_cs);
     ++g_refCount;
+    LeaveCriticalSection(&g_cs);
     return TRUE;
 }
 
 __declspec(dllexport) void DVP_Uninit(void)
 {
-    LeoScopeLock lock;
+    EnterCriticalSection(&g_cs);
     if (g_refCount > 0)
         --g_refCount;
-    if (g_refCount == 0 && g_wicFactory)
-    {
-        g_wicFactory->Release();
-        g_wicFactory = nullptr;
-    }
+    LeaveCriticalSection(&g_cs);
+    if (g_refCount == 0)
+        DestroyDB();
 }
 
 __declspec(dllexport) BOOL DVP_USBSafe(LPOPUSUSBSAFEDATA /*pUSBSafeData*/)
@@ -355,13 +280,29 @@ static void FillFileInfo(LPVIEWERPLUGINFILEINFOW lpVPFileInfo, const SIZE& size,
     lpVPFileInfo->iNumBits   = bits;
 }
 
-// Identify a local file: magic bytes first, then require that WIC really has
-// a codec for it (so files we cannot decode pass through to other viewers).
+// Sniff a header buffer; returns true when the bytes belong to a format we claim.
+static bool SniffSupported(const uint8_t* d, size_t n)
+{
+    if (n < 12)
+        return false;
+    try
+    {
+        return IsSupportedSniff(jark::sniffFileFormat(std::span<const uint8_t>(d, n)));
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+// Identify a local file: sniff magic bytes, then decode once (result lands in
+// the LRU cache so the following LoadBitmap is free). This gives DOpus the
+// real image size without paying a second decode.
 __declspec(dllexport) BOOL DVP_IdentifyFileW(HWND /*hWnd*/, LPWSTR lpszName,
                                              LPVIEWERPLUGINFILEINFOW lpVPFileInfo,
                                              HANDLE /*hAbortEvent*/)
 {
-    if (g_refCount == 0 || !lpVPFileInfo)
+    if (g_refCount == 0 || !lpVPFileInfo || !lpszName)
         return FALSE;
 
     uint8_t header[96] = {};
@@ -377,26 +318,25 @@ __declspec(dllexport) BOOL DVP_IdentifyFileW(HWND /*hWnd*/, LPWSTR lpszName,
         got = read;
     }
 
-    if (SniffFormat(header, got) == Fmt::None)
+    if (!SniffSupported(header, got))
         return FALSE;
 
-    ScopedCOM com;
-    if (!com.ok())
+    auto asset = LoadAsset(lpszName);
+    if (!asset)
         return FALSE;
-    IWICImagingFactory* factory = GetWICFactory();
-    BOOL result = FALSE;
-    if (factory)
-    {
-        SIZE size = {};
-        if (WicCanDecodeFile(lpszName, factory, &size))
-        {
-            FillFileInfo(lpVPFileInfo, size, 32);
-            result = TRUE;
-        }
-    }
-    return result;
+
+    const cv::Mat& m = asset->frames.empty() ? asset->primaryFrame
+                                             : (asset->primaryFrame.empty() ? asset->frames.front()
+                                                                            : asset->primaryFrame);
+    if (m.empty())
+        return FALSE;
+
+    FillFileInfo(lpVPFileInfo, SIZE{ m.cols, m.rows }, 32);
+    return TRUE;
 }
 
+// Stream identify (files inside archives/FTP): sniff only, no size probe —
+// full decode happens in LoadBitmapStreamW.
 __declspec(dllexport) BOOL DVP_IdentifyFileStreamW(HWND /*hWnd*/, LPSTREAM lpStream,
                                                    LPWSTR /*lpszName*/,
                                                    LPVIEWERPLUGINFILEINFOW lpVPFileInfo,
@@ -405,7 +345,6 @@ __declspec(dllexport) BOOL DVP_IdentifyFileStreamW(HWND /*hWnd*/, LPSTREAM lpStr
     if (g_refCount == 0 || !lpStream || !lpVPFileInfo)
         return FALSE;
 
-    // Remember position, read the header, restore position.
     LARGE_INTEGER zero = {};
     ULARGE_INTEGER cur = {};
     if (FAILED(lpStream->Seek(zero, STREAM_SEEK_CUR, &cur)))
@@ -417,85 +356,114 @@ __declspec(dllexport) BOOL DVP_IdentifyFileStreamW(HWND /*hWnd*/, LPSTREAM lpStr
     ULONG read = 0;
     HRESULT hr = lpStream->Read(header, sizeof(header), &read);
     lpStream->Seek(restorePos, STREAM_SEEK_SET, nullptr);
-    if (FAILED(hr) || SniffFormat(header, read) == Fmt::None)
+    if (FAILED(hr) || !SniffSupported(header, read))
         return FALSE;
 
-    ScopedCOM com;
-    if (!com.ok())
-        return FALSE;
-    IWICImagingFactory* factory = GetWICFactory();
-    BOOL result = FALSE;
-    if (factory)
-    {
-        IWICBitmapDecoder* decoder = nullptr;
-        if (SUCCEEDED(factory->CreateDecoderFromStream(lpStream, nullptr,
-                                                       WICDecodeMetadataCacheOnDemand, &decoder)))
-        {
-            IWICBitmapFrameDecode* frame = nullptr;
-            if (SUCCEEDED(decoder->GetFrame(0, &frame)))
-            {
-                UINT w = 0, h = 0;
-                if (SUCCEEDED(frame->GetSize(&w, &h)) && w > 0 && h > 0)
-                {
-                    FillFileInfo(lpVPFileInfo, SIZE{ static_cast<LONG>(w), static_cast<LONG>(h) }, 32);
-                    result = TRUE;
-                }
-                frame->Release();
-            }
-            decoder->Release();
-        }
-    }
-    return result;
+    // Size unknown without a decode; report the header box can't give cheaply.
+    // DOpus will get the real size from the returned bitmap.
+    FillFileInfo(lpVPFileInfo, SIZE{ 0, 0 }, 32);
+    return TRUE;
 }
 
+// First frame -> HBITMAP. Decode is served from the LRU cache filled at identify.
 __declspec(dllexport) HBITMAP DVP_LoadBitmapW(HWND /*hWnd*/, LPWSTR lpszName,
                                               LPVIEWERPLUGINFILEINFOW lpVPFileInfo,
                                               LPSIZE lpszSize, HANDLE /*hAbortEvent*/)
 {
-    if (g_refCount == 0)
+    if (g_refCount == 0 || !lpszName)
         return nullptr;
 
-    ScopedCOM com;
-    if (!com.ok())
+    auto asset = LoadAsset(lpszName);
+    if (!asset)
         return nullptr;
-    IWICImagingFactory* factory = GetWICFactory();
-    HBITMAP hbmp = nullptr;
-    if (factory)
-    {
-        IWICBitmapDecoder* decoder = nullptr;
-        if (SUCCEEDED(factory->CreateDecoderFromFilename(lpszName, nullptr, GENERIC_READ,
-                                                         WICDecodeMetadataCacheOnDemand, &decoder)))
-        {
-            hbmp = DecodeFirstFrame(factory, decoder, lpszSize, lpVPFileInfo);
-            decoder->Release();
-        }
-    }
-    return hbmp;
+
+    const cv::Mat& m = asset->frames.empty() ? asset->primaryFrame
+                                             : (asset->primaryFrame.empty() ? asset->frames.front()
+                                                                            : asset->primaryFrame);
+    return MatToDIB(m, lpszSize, lpVPFileInfo);
 }
 
+// Stream load: materialize the stream into a temp file (JarkViewer's loader is
+// path-based), decode, then remove the temp file.
 __declspec(dllexport) HBITMAP DVP_LoadBitmapStreamW(HWND /*hWnd*/, LPSTREAM lpStream,
-                                                    LPWSTR /*lpszName*/,
+                                                    LPWSTR lpszName,
                                                     LPVIEWERPLUGINFILEINFOW lpVPFileInfo,
                                                     LPSIZE lpszSize, DWORD /*dwStreamFlags*/)
 {
-    if (g_refCount == 0)
+    if (g_refCount == 0 || !lpStream)
         return nullptr;
 
-    ScopedCOM com;
-    if (!com.ok())
+    // Stream size.
+    LARGE_INTEGER zero = {}, end = {};
+    ULARGE_INTEGER cur = {};
+    if (FAILED(lpStream->Seek(zero, STREAM_SEEK_CUR, &cur)) ||
+        FAILED(lpStream->Seek(zero, STREAM_SEEK_END, &end)))
         return nullptr;
-    IWICImagingFactory* factory = GetWICFactory();
+    const unsigned long long total = end.QuadPart;
+    LARGE_INTEGER back = {};
+    back.QuadPart = 0;
+    if (FAILED(lpStream->Seek(back, STREAM_SEEK_SET, nullptr)))
+        return nullptr;
+
+    if (total < 16 || total > 2ull * 1024 * 1024 * 1024)
+        return nullptr;
+
+    wchar_t tmpPath[MAX_PATH * 2] = {};
+    wchar_t tmpDir[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tmpDir);
+    const wchar_t* baseName = lpszName ? wcsrchr(lpszName, L'\\') : nullptr;
+    baseName = baseName ? baseName + 1 : L"stream.heic";
+    if (!GetTempFileNameW(tmpDir, L"jvo", 0, tmpPath))
+        return nullptr;
+    // GetTempFileName gives ".tmp"; rename to the real extension so the
+    // loader routes by extension where the header is not authoritative.
+    std::wstring realPath = tmpPath;
+    realPath = realPath.substr(0, realPath.size() - 4);
+    realPath += baseName;
+
+    bool ok = false;
     HBITMAP hbmp = nullptr;
-    if (factory)
+    HANDLE hFile = CreateFileW(realPath.c_str(), GENERIC_WRITE, 0,
+                               nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE)
     {
-        IWICBitmapDecoder* decoder = nullptr;
-        if (SUCCEEDED(factory->CreateDecoderFromStream(lpStream, nullptr,
-                                                       WICDecodeMetadataCacheOnDemand, &decoder)))
+        char buf[65536];
+        unsigned long long remaining = total;
+        ok = true;
+        while (remaining > 0)
         {
-            hbmp = DecodeFirstFrame(factory, decoder, lpszSize, lpVPFileInfo);
-            decoder->Release();
+            ULONG want = static_cast<ULONG>(std::min<unsigned long long>(remaining, sizeof(buf)));
+            ULONG got = 0;
+            if (FAILED(lpStream->Read(buf, want, &got)) || got == 0)
+            {
+                ok = false;
+                break;
+            }
+            DWORD written = 0;
+            if (!WriteFile(hFile, buf, got, &written, nullptr) || written != got)
+            {
+                ok = false;
+                break;
+            }
+            remaining -= got;
+        }
+        CloseHandle(hFile);
+
+        if (ok)
+        {
+            auto asset = LoadAsset(realPath);
+            if (asset)
+            {
+                const cv::Mat& m = asset->frames.empty() ? asset->primaryFrame
+                                                         : (asset->primaryFrame.empty() ? asset->frames.front()
+                                                                                        : asset->primaryFrame);
+                hbmp = MatToDIB(m, lpszSize, lpVPFileInfo);
+            }
         }
     }
+
+    DeleteFileW(tmpPath);
+    DeleteFileW(realPath.c_str());
     return hbmp;
 }
 

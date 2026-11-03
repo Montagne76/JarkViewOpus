@@ -1,0 +1,1118 @@
+#pragma once
+
+#include "jarkUtils.h"
+
+#include "MediaPlayer.h"  // VideoSource（实况照片/视频源）定义
+#include "VectorImage.h"  // VectorImage 定义
+
+#include <shlwapi.h>
+#pragma comment(lib, "shlwapi.lib")
+
+#include <cstdint>
+#include <atomic>
+#include <fstream>
+#include <mutex>
+#include <unordered_set>
+
+size_t ImageAsset::memoryBytes() const noexcept {
+    size_t total = sizeof(ImageAsset) + iccProfile.capacity() +
+        exifInfo.capacity() + placeholderDetail.capacity() * sizeof(wchar_t);
+
+    // 同一块像素可能被多个成员共用（实况/动图的 primaryFrame 与 frames[0] 是浅拷贝），
+    // 按像素首地址去重；子矩阵（ROI）只按自己可见的部分算，估算偏小一侧。
+    std::unordered_set<const void*> seen;
+    const auto addMat = [&total, &seen](const cv::Mat& mat) {
+        if (mat.empty() || !seen.insert(mat.data).second)
+            return;
+        total += mat.total() * mat.elemSize();
+    };
+    addMat(primaryFrame);
+    for (const auto& frame : frames)
+        addMat(frame);
+    if (vectorSource)
+        addMat(vectorSource->detailFrame); // lunasvg 的文档内存没法估，不计
+    if (videoSource)
+        total += videoSource->data.capacity() + videoSource->extension.capacity() * sizeof(wchar_t);
+    return total;
+}
+
+
+namespace {
+    std::mutex logFileMutex;
+    std::ofstream logFileStream;
+    bool logFileTried = false;
+
+    std::filesystem::path defaultLogPath() {
+        wchar_t tempPath[MAX_PATH] = {};
+        const DWORD length = ::GetTempPathW(MAX_PATH, tempPath);
+        std::filesystem::path dir = (length > 0 && length < MAX_PATH)
+            ? std::filesystem::path(tempPath)
+            : std::filesystem::temp_directory_path();
+        return dir / L"JarkViewer.log";
+    }
+}
+
+void jarkUtils::setLogEnabled(bool enabled) noexcept {
+    logEnabled = enabled;
+}
+
+std::wstring jarkUtils::logFilePath() {
+    return defaultLogPath().wstring();
+}
+
+void jarkUtils::writeLogLine(std::string_view text) {
+    std::lock_guard<std::mutex> lock(logFileMutex);
+
+    if (!logFileTried) {
+        logFileTried = true;
+        logFileStream.open(defaultLogPath(), std::ios::binary | std::ios::app);
+        if (logFileStream.is_open()) {
+            auto now = std::chrono::system_clock::now();
+            auto time = std::chrono::current_zone()->to_local(now);
+            logFileStream << std::format("\n===== JarkViewer log {} =====", time) << '\n';
+        }
+    }
+
+    if (!logFileStream.is_open())
+        return;
+
+    logFileStream << text << '\n';
+    logFileStream.flush();
+}
+
+std::string jarkUtils::bin2Hex(const void* bytes, const size_t len) {
+    auto charList = "0123456789ABCDEF";
+    if (len == 0) return "";
+    string res(len * 3 - 1, ' ');
+    for (size_t i = 0; i < len; i++) {
+        const uint8_t value = reinterpret_cast<const uint8_t*>(bytes)[i];
+        res[i * 3] = charList[value >> 4];
+        res[i * 3 + 1] = charList[value & 0x0f];
+    }
+    return res;
+}
+
+bool jarkUtils::writeFileAtomically(const std::wstring& path, std::span<const uint8_t> data,
+    bool overwrite) {
+    static std::atomic<uint64_t> sequence{ 0 };
+    const std::filesystem::path target(path);
+    std::wstring temporary;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 128; ++attempt) {
+        temporary = (target.parent_path() / std::format(L".jark-{}-{}.tmp",
+            GetCurrentProcessId(), sequence.fetch_add(1))).wstring();
+        file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE)
+            break;
+        if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS)
+            return false;
+    }
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+
+    DWORD error = ERROR_SUCCESS;
+    size_t offset = 0;
+    while (offset < data.size()) {
+        const DWORD count = static_cast<DWORD>((std::min)(data.size() - offset, size_t{ 1 } << 30));
+        DWORD written = 0;
+        if (!WriteFile(file, data.data() + offset, count, &written, nullptr)) {
+            error = GetLastError();
+            break;
+        }
+        if (written == 0) {
+            error = ERROR_WRITE_FAULT;
+            break;
+        }
+        offset += written;
+    }
+    if (error == ERROR_SUCCESS && !FlushFileBuffers(file))
+        error = GetLastError();
+    if (!CloseHandle(file) && error == ERROR_SUCCESS)
+        error = GetLastError();
+
+    // 不先删除目标：磁盘满、目标被锁定、只读等失败都不能把原图变成空文件。
+    if (error == ERROR_SUCCESS && !MoveFileExW(temporary.c_str(), path.c_str(),
+        MOVEFILE_WRITE_THROUGH | (overwrite ? MOVEFILE_REPLACE_EXISTING : 0)))
+        error = GetLastError();
+    if (error != ERROR_SUCCESS) {
+        DeleteFileW(temporary.c_str());
+        SetLastError(error);
+        return false;
+    }
+    return true;
+}
+
+cv::Scalar jarkUtils::to_cv_scalar(uint32_t color) {
+    uint8_t a = (color >> 24) & 0xFF;
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
+    return cv::Scalar(b, g, r, a);
+}
+
+std::wstring jarkUtils::ansiToWstring(string_view str) {
+    if (str.empty())return L"";
+
+    int wcharLen = MultiByteToWideChar(CP_ACP, 0, str.data(), (int)str.length(), nullptr, 0);
+    if (wcharLen == 0) return L"";
+
+    std::wstring ret(wcharLen, 0);
+    MultiByteToWideChar(CP_ACP, 0, str.data(), (int)str.length(), ret.data(), wcharLen);
+
+    return ret;
+}
+
+std::string jarkUtils::wstringToAnsi(wstring_view wstr) {
+    if (wstr.empty())return "";
+
+    int byteLen = WideCharToMultiByte(CP_ACP, 0, wstr.data(), (int)wstr.length(), nullptr, 0, nullptr, nullptr);
+    if (byteLen == 0) return "";
+
+    std::string ret(byteLen, 0);
+    WideCharToMultiByte(CP_ACP, 0, wstr.data(), (int)wstr.length(), ret.data(), byteLen, nullptr, nullptr);
+    return ret;
+}
+
+std::wstring jarkUtils::utf8ToWstring(string_view str) {
+    if (str.empty())return L"";
+
+    int wcharLen = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.length(), nullptr, 0);
+    if (wcharLen == 0) return L"";
+
+    std::wstring ret(wcharLen, 0);
+    MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.length(), ret.data(), wcharLen);
+
+    return ret;
+}
+
+std::string jarkUtils::wstringToUtf8(wstring_view wstr) {
+    if (wstr.empty())return "";
+
+    int byteLen = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.length(), nullptr, 0, nullptr, nullptr);
+    if (byteLen == 0) return "";
+
+    std::string ret(byteLen, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.length(), ret.data(), byteLen, nullptr, nullptr);
+    return ret;
+}
+
+std::wstring jarkUtils::latin1ToWstring(string_view str) {
+    if (str.empty())return L"";
+
+    int wcharLen = MultiByteToWideChar(1252, 0, str.data(), (int)str.length(), nullptr, 0);
+    if (wcharLen == 0) return L"";
+
+    std::wstring ret(wcharLen, 0);
+    MultiByteToWideChar(1252, 0, str.data(), (int)str.length(), ret.data(), wcharLen);
+
+    return ret;
+}
+
+std::string jarkUtils::utf8ToAnsi(string_view str) {
+    return wstringToAnsi(utf8ToWstring(str));
+}
+
+std::string jarkUtils::ansiToUtf8(string_view str) {
+    return wstringToUtf8(ansiToWstring(str));
+}
+
+static inline std::string unicodeToUTF8(uint32_t codePoint) {
+    std::string utf8;
+
+    if (codePoint <= 0x7F) {
+        utf8.push_back(static_cast<char>(codePoint));
+    }
+    else if (codePoint <= 0x7FF) {
+        utf8.push_back(static_cast<char>(0xC0 | ((codePoint >> 6) & 0x1F)));
+        utf8.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
+    }
+    else if (codePoint <= 0xFFFF) {
+        utf8.push_back(static_cast<char>(0xE0 | ((codePoint >> 12) & 0x0F)));
+        utf8.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F)));
+        utf8.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
+    }
+    else if (codePoint <= 0x10FFFF) {
+        utf8.push_back(static_cast<char>(0xF0 | ((codePoint >> 18) & 0x07)));
+        utf8.push_back(static_cast<char>(0x80 | ((codePoint >> 12) & 0x3F)));
+        utf8.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3F)));
+        utf8.push_back(static_cast<char>(0x80 | (codePoint & 0x3F)));
+    }
+
+    return utf8;
+}
+
+std::string jarkUtils::convertUnicodeEscapesToUTF8(string_view str) {
+    std::string result;
+
+    for (size_t i = 0; i < str.length(); ++i) {
+        if (i + 5 < str.length() &&
+            str[i] == '\\' && str[i + 1] == 'u') {
+
+            std::string hexStr(str.substr(i + 2, 4));
+
+            bool validHex = true;
+            for (char c : hexStr) {
+                if (!isxdigit(c)) {
+                    validHex = false;
+                    break;
+                }
+            }
+
+            if (validHex) {
+                uint32_t codePoint = std::stoul(hexStr, nullptr, 16);
+                result += unicodeToUTF8(codePoint);
+                i += 5; // 跳过已处理的字符
+            }
+            else {
+                result.push_back(str[i]);
+            }
+        }
+        else {
+            result.push_back(str[i]);
+        }
+    }
+
+    return result;
+}
+
+rcFileInfo jarkUtils::GetResource(unsigned int idi, const wchar_t* type) {
+    rcFileInfo rc{};
+
+    HMODULE ghmodule = GetModuleHandleW(nullptr);
+    if (!ghmodule) {
+        log("ghmodule nullptr");
+        return rc;
+    }
+
+    HRSRC hrsrc = FindResourceW(ghmodule, MAKEINTRESOURCEW(idi), type);
+    if (!hrsrc) {
+        log("hrstc nullptr");
+        return rc;
+    }
+
+    HGLOBAL hg = LoadResource(ghmodule, hrsrc);
+    if (!hg) {
+        log("hg nullptr");
+        return rc;
+    }
+
+    rc.ptr = (unsigned char*)(LockResource(hg));
+    rc.size = SizeofResource(ghmodule, hrsrc);
+    return rc;
+}
+
+std::string jarkUtils::size2Str(const size_t fileSize) {
+    if (fileSize < 1024) return std::format("{} Bytes", fileSize);
+    if (fileSize < 1024ULL * 1024) return std::format("{:.1f} KiB", fileSize / 1024.0);
+    if (fileSize < 1024ULL * 1024 * 1024) return std::format("{:.1f} MiB", fileSize / (1024.0 * 1024));
+    return std::format("{:.1f} GiB", fileSize / (1024.0 * 1024 * 1024));
+}
+
+std::string jarkUtils::timeStamp2Str(time_t timeStamp) {
+    timeStamp += 8ULL * 3600; // UTC+8
+    std::tm* ptm = std::gmtime(&timeStamp);
+    std::stringstream ss;
+    ss << std::put_time(ptm, "%Y-%m-%d %H:%M:%S UTC+8");
+    return ss.str();
+}
+
+WinSize jarkUtils::getWindowSize(HWND hwnd) {
+    RECT rect;
+    if (GetClientRect(hwnd, &rect)) {
+        return { rect.right,rect.bottom };
+    }
+    else {
+        log("getWindowSize fail.");
+        return { 0,0 };
+    }
+}
+
+// 设置窗口图标
+void jarkUtils::setWindowIcon(HWND hWnd, WORD wIconId) {
+    HICON hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCE(wIconId));
+    if (hIcon) {
+        SendMessageW(hWnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+        SendMessageW(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+    }
+}
+
+// 禁止窗口调整尺寸
+void jarkUtils::disableWindowResize(HWND hwnd) {
+    if (hwnd) {
+        LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+        style &= ~WS_THICKFRAME;   // 移除 WS_THICKFRAME 样式即可禁止拉伸
+        style &= ~WS_MAXIMIZEBOX;  // 移除最大化按钮
+        SetWindowLongW(hwnd, GWL_STYLE, style);
+    }
+}
+
+bool jarkUtils::copyToClipboard(wstring_view text) {
+    if (!OpenClipboard(nullptr)) {
+        return false;
+    }
+
+    EmptyClipboard();
+
+    HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));
+    if (!hGlob) {
+        CloseClipboard();
+        return false;
+    }
+
+    auto desPtr = GlobalLock(hGlob);
+    if (desPtr) {
+        memcpy(desPtr, text.data(), text.size() * sizeof(wchar_t));
+        ((wchar_t*)desPtr)[text.size()] = L'\0'; // 显式添加 NUL 终止符
+    }
+    GlobalUnlock(hGlob);
+
+    if (!SetClipboardData(CF_UNICODETEXT, hGlob)) {
+        CloseClipboard();
+        GlobalFree(hGlob);
+        return false;
+    }
+
+    CloseClipboard();
+    return true;
+}
+
+bool jarkUtils::limitSizeTo16K(cv::Mat& image) {
+    // 检查并缩放图像（保持宽高比）。短边夹到至少 1 像素：极端长宽比（如 20000x1）按比例
+    // 算出的短边会是 0，cv::resize 直接抛异常，调用方（打印预览等）会跟着崩。
+    if (image.cols > 16384 || image.rows > 16384) {
+        try {
+            const double scale = std::min(16384.0 / image.cols, 16384.0 / image.rows);
+            const int newWidth = (std::max)(1, static_cast<int>(image.cols * scale));
+            const int newHeight = (std::max)(1, static_cast<int>(image.rows * scale));
+            cv::Mat resized;
+            cv::resize(image, resized, cv::Size(newWidth, newHeight), 0, 0, cv::INTER_LINEAR);
+            image = std::move(resized);
+        }
+        catch (const cv::Exception& e) {
+            JARK_LOG("limitSizeTo16K failed: {}", e.what());
+            return false;
+        }
+        MessageBoxW(nullptr, std::format(L"{} {}x{}", getUIStringW(16).c_str(), image.cols, image.rows).c_str(), getUIStringW(15), MB_OK | MB_ICONWARNING);
+    }
+    return true;
+}
+
+// Alpha透明通道混合白色背景
+void jarkUtils::flattenRGBAonWhite(cv::Mat& image) {
+    if (image.empty() || image.type() != CV_8UC4)
+        return;
+
+    const int width = image.cols;
+    const int height = image.rows;
+
+    for (int y = 0; y < height; y++) {
+        BYTE* srcRow = image.ptr<BYTE>(y);
+
+        for (int x = 0; x < width; x++) {
+            BYTE b = srcRow[x * 4];
+            BYTE g = srcRow[x * 4 + 1];
+            BYTE r = srcRow[x * 4 + 2];
+            BYTE a = srcRow[x * 4 + 3];
+
+            if (a == 0) {
+                srcRow[x * 4] = 255;
+                srcRow[x * 4 + 1] = 255;
+                srcRow[x * 4 + 2] = 255;
+                srcRow[x * 4 + 3] = 255;
+            }
+            else if (a != 255) {
+                srcRow[x * 4] = static_cast<BYTE>((b * a + 255 * (255 - a) + 255) >> 8);
+                srcRow[x * 4 + 1] = static_cast<BYTE>((g * a + 255 * (255 - a) + 255) >> 8);
+                srcRow[x * 4 + 2] = static_cast<BYTE>((r * a + 255 * (255 - a) + 255) >> 8);
+                srcRow[x * 4 + 3] = 255;
+            }
+        }
+    }
+}
+
+void jarkUtils::copyImageToClipboard(const cv::Mat& image, wstring_view filePath) {
+    if (image.empty()) {
+        MessageBoxW(nullptr, getUIStringW(17), getUIStringW(14), MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    cv::Mat processedImage;
+
+    // 转换为BGRA格式
+    try {
+        if (image.channels() == 1) {
+            cv::cvtColor(image, processedImage, cv::COLOR_GRAY2BGRA);
+        }
+        else if (image.channels() == 3) {
+            cv::cvtColor(image, processedImage, cv::COLOR_BGR2BGRA);
+        }
+        else if (image.channels() == 4) {
+            processedImage = image.clone();
+        }
+        else {
+            MessageBoxW(nullptr, std::format(L"{} {}", getUIStringW(18).c_str(), processedImage.channels()).c_str(), getUIStringW(19), MB_OK | MB_ICONERROR);
+            return;
+        }
+    }
+    catch (const cv::Exception& e) {
+        MessageBoxW(nullptr, jarkUtils::utf8ToWstring(e.what()).c_str(), getUIStringW(20), MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // 检查并缩放图像（保持宽高比）
+    if (!limitSizeTo16K(processedImage))
+        return;
+
+    const int width = processedImage.cols;
+    const int height = processedImage.rows;
+
+
+    // 打开剪贴板
+    if (!OpenClipboard(nullptr)) {
+        MessageBoxW(nullptr, getUIStringW(21), getUIStringW(14), MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // 清空剪贴板
+    if (!EmptyClipboard()) {
+        CloseClipboard();
+        MessageBoxW(nullptr, getUIStringW(22), getUIStringW(14), MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    int dibStride = width * 4;
+    int imageDataSize = dibStride * height;
+
+    // 创建CF_DIBV5格式数据
+    int dibv5Size = sizeof(BITMAPV5HEADER) + imageDataSize;
+    HGLOBAL hDibV5 = GlobalAlloc(GMEM_MOVEABLE, dibv5Size);
+    if (hDibV5) {
+        LPVOID pDibV5 = GlobalLock(hDibV5);
+        if (pDibV5) {
+            // 填充BITMAPV5HEADER
+            BITMAPV5HEADER* pBmpV5Header = static_cast<BITMAPV5HEADER*>(pDibV5);
+            memset(pBmpV5Header, 0, sizeof(BITMAPV5HEADER));
+
+            pBmpV5Header->bV5Size = sizeof(BITMAPV5HEADER);
+            pBmpV5Header->bV5Width = width;
+            pBmpV5Header->bV5Height = height;
+            pBmpV5Header->bV5Planes = 1;
+            pBmpV5Header->bV5BitCount = 32;
+            pBmpV5Header->bV5Compression = BI_BITFIELDS;
+            pBmpV5Header->bV5SizeImage = imageDataSize;
+            pBmpV5Header->bV5XPelsPerMeter = 0;
+            pBmpV5Header->bV5YPelsPerMeter = 0;
+            pBmpV5Header->bV5ClrUsed = 0;
+            pBmpV5Header->bV5ClrImportant = 0;
+
+            // 设置颜色掩码 (BGRA格式)
+            pBmpV5Header->bV5RedMask = 0x00FF0000;
+            pBmpV5Header->bV5GreenMask = 0x0000FF00;
+            pBmpV5Header->bV5BlueMask = 0x000000FF;
+            pBmpV5Header->bV5AlphaMask = 0xFF000000;
+
+            // 设置颜色空间
+            pBmpV5Header->bV5CSType = LCS_sRGB;
+            pBmpV5Header->bV5Intent = LCS_GM_GRAPHICS;
+
+            // 复制图像数据
+            BYTE* pImageData = static_cast<BYTE*>(pDibV5) + sizeof(BITMAPV5HEADER);
+            for (int y = 0; y < height; y++) {
+                const BYTE* srcRow = processedImage.ptr<BYTE>(height - 1 - y);
+                BYTE* dstRow = pImageData + y * dibStride;
+                memcpy(dstRow, srcRow, width * 4ULL);
+            }
+
+            GlobalUnlock(hDibV5);
+
+            // 设置到剪贴板
+            if (!SetClipboardData(CF_DIBV5, hDibV5)) {
+                GlobalFree(hDibV5);
+            }
+        }
+        else {
+            GlobalFree(hDibV5);
+        }
+    }
+
+    // 将透明像素混合白色背景
+    flattenRGBAonWhite(processedImage);
+
+    // 创建CF_DIB格式数据
+    int dibSize = sizeof(BITMAPINFOHEADER) + imageDataSize;
+    HGLOBAL hDib = GlobalAlloc(GMEM_MOVEABLE, dibSize);
+    if (hDib) {
+        LPVOID pDib = GlobalLock(hDib);
+        if (pDib) {
+            // 填充BITMAPINFOHEADER
+            BITMAPINFOHEADER* pBmpHeader = static_cast<BITMAPINFOHEADER*>(pDib);
+            ZeroMemory(pBmpHeader, sizeof(BITMAPINFOHEADER));
+
+            pBmpHeader->biSize = sizeof(BITMAPINFOHEADER);
+            pBmpHeader->biWidth = width;
+            pBmpHeader->biHeight = height;
+            pBmpHeader->biPlanes = 1;
+            pBmpHeader->biBitCount = 32;
+            pBmpHeader->biCompression = BI_RGB; // CF_DIB通常使用BI_RGB
+            pBmpHeader->biSizeImage = imageDataSize;
+
+            // 复制图像数据
+            BYTE* pImageData = static_cast<BYTE*>(pDib) + sizeof(BITMAPINFOHEADER);
+            for (int y = 0; y < height; y++) {
+                const BYTE* srcRow = processedImage.ptr<BYTE>(height - 1 - y);
+                BYTE* dstRow = pImageData + y * dibStride;
+                memcpy(dstRow, srcRow, width * 4ULL);
+            }
+
+            GlobalUnlock(hDib);
+
+            // 设置到剪贴板
+            if (!SetClipboardData(CF_DIB, hDib)) {
+                GlobalFree(hDib);
+            }
+        }
+        else {
+            GlobalFree(hDib);
+        }
+    }
+
+    // 文件本体（CF_HDROP）：动图/实况/视频粘到聊天软件时按原文件发送，动画与音轨都保留；
+    // 接收方不支持该格式时会退回上面的位图。只有磁盘上真实存在的文件才放。
+    if (!filePath.empty()) {
+        std::error_code ec;
+        if (std::filesystem::exists(std::filesystem::path(filePath), ec) && !ec) {
+            const std::wstring fullPath = std::filesystem::absolute(std::filesystem::path(filePath), ec).wstring();
+            if (!ec) {
+                const size_t dropBytes = sizeof(DROPFILES) + (fullPath.size() + 2) * sizeof(wchar_t);
+                HGLOBAL hDrop = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, dropBytes);
+                if (hDrop) {
+                    DROPFILES* drop = static_cast<DROPFILES*>(GlobalLock(hDrop));
+                    if (drop) {
+                        drop->pFiles = sizeof(DROPFILES);
+                        drop->fWide = TRUE; // 宽字符路径，双空结尾（GMEM_ZEROINIT 保证）
+                        memcpy(reinterpret_cast<BYTE*>(drop) + sizeof(DROPFILES),
+                            fullPath.c_str(), (fullPath.size() + 1) * sizeof(wchar_t));
+                        GlobalUnlock(hDrop);
+
+                        if (SetClipboardData(CF_HDROP, hDrop))
+                            JARK_LOG("剪贴板：已同时放入文件本体 {}", jarkUtils::wstringToUtf8(fullPath));
+                        else {
+                            JARK_LOG("剪贴板：CF_HDROP 失败 {}", ::GetLastError());
+                            GlobalFree(hDrop);
+                        }
+                    }
+                    else {
+                        GlobalFree(hDrop);
+                    }
+                }
+            }
+        }
+    }
+
+    // 关闭剪贴板
+    CloseClipboard();
+}
+
+
+namespace {
+    RECT fullScreenPreRect{};
+    DWORD fullScreenPreStyle = 0;
+    DWORD fullScreenPreExStyle = 0;
+    bool isFullScreen = false;
+    // 进全屏那一刻的窗口状态（showCmd 区分普通/最大化，rcNormalPosition 是窗口化矩形）。
+    // 与 fullScreenPreRect 的区别：那个是"退出全屏时把窗口摆回哪儿"，这个是"这次全屏之前
+    // 用户看到的是个什么窗口"——退出程序时正处在全屏，回写几何记忆要的是后者
+    WINDOWPLACEMENT fullScreenPrePlacement{};
+    bool hasFullScreenPrePlacement = false;
+}
+
+bool jarkUtils::IsFullScreen() {
+    return isFullScreen;
+}
+
+bool jarkUtils::GetPreFullScreenPlacement(WINDOWPLACEMENT& placement) {
+    if (!hasFullScreenPrePlacement)
+        return false;
+    placement = fullScreenPrePlacement;
+    return true;
+}
+
+// 只在状态需要变化时动作（幻灯片播放要"确保全屏"，不能无脑 toggle）
+void jarkUtils::SetFullScreen(HWND hwnd, bool fullScreen) {
+    if (isFullScreen == fullScreen)
+        return;
+
+    if (fullScreen) {
+        // 保存当前窗口状态
+        GetWindowRect(hwnd, &fullScreenPreRect);
+        fullScreenPreStyle = GetWindowLong(hwnd, GWL_STYLE);
+        fullScreenPreExStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+
+        // 另外记一份"窗口状态"给几何记忆用（见 GetPreFullScreenPlacement）
+        fullScreenPrePlacement = { .length = sizeof(WINDOWPLACEMENT) };
+        hasFullScreenPrePlacement = GetWindowPlacement(hwnd, &fullScreenPrePlacement) != FALSE;
+
+        // 切换到全屏模式
+        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO monitorInfo = { sizeof(monitorInfo) };
+        GetMonitorInfo(monitor, &monitorInfo);
+
+        SetWindowLong(hwnd, GWL_STYLE, fullScreenPreStyle & ~(WS_CAPTION | WS_THICKFRAME));
+        SetWindowLong(hwnd, GWL_EXSTYLE, fullScreenPreExStyle & ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE));
+
+        SetWindowPos(hwnd, HWND_TOP,
+            monitorInfo.rcMonitor.left, monitorInfo.rcMonitor.top,
+            monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left,
+            monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top,
+            SWP_NOZORDER | SWP_FRAMECHANGED);
+    }
+    else {
+        // 退出全屏模式，恢复之前的窗口状态
+        SetWindowLong(hwnd, GWL_STYLE, fullScreenPreStyle);
+        SetWindowLong(hwnd, GWL_EXSTYLE, fullScreenPreExStyle);
+        SetWindowPos(hwnd, nullptr, fullScreenPreRect.left, fullScreenPreRect.top,
+            fullScreenPreRect.right - fullScreenPreRect.left,
+            fullScreenPreRect.bottom - fullScreenPreRect.top,
+            SWP_NOZORDER | SWP_FRAMECHANGED);
+    }
+
+    isFullScreen = fullScreen;
+}
+
+void jarkUtils::ToggleFullScreen(HWND hwnd) {
+    SetFullScreen(hwnd, !isFullScreen);
+}
+
+std::wstring jarkUtils::SelectFile(HWND hWnd) {
+    OPENFILENAMEW ofn;
+    wchar_t szFile[1024] = { 0 };
+
+    memset(&ofn, 0, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFile = szFile;
+    ofn.hwndOwner = hWnd;
+    ofn.nMaxFile = sizeof(szFile) / sizeof(wchar_t);
+    ofn.lpstrFilter = L"All Files\0*.*\0"; // 过滤器
+    ofn.nFilterIndex = 1;
+    ofn.lpstrFileTitle = nullptr;
+    ofn.nMaxFileTitle = 0;
+    ofn.lpstrInitialDir = nullptr;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+    if (GetOpenFileNameW(&ofn) == TRUE) {
+        return std::wstring(szFile);
+    }
+    else {
+        return L"";
+    }
+}
+
+namespace {
+    struct StartupTraceState {
+        bool initialized = false;
+        bool enabled = false;
+        std::wstring path;
+        std::chrono::steady_clock::time_point start;
+    };
+}
+
+void jarkUtils::startupTraceMark(const char* stage) {
+    static StartupTraceState state;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (!state.initialized) {
+        state.initialized = true;
+        state.start = now;
+        wchar_t buffer[1024] = {};
+        const DWORD length = ::GetEnvironmentVariableW(L"JARKVIEWER_STARTUP_TRACE", buffer, 1024);
+        if (length > 0 && length < 1024) {
+            state.enabled = true;
+            state.path = buffer;
+        }
+    }
+    if (!state.enabled)
+        return;
+
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - state.start).count();
+    std::ofstream file(std::filesystem::path(state.path), std::ios::app);
+    if (file) {
+        file << std::format("{} +{} ms\n", stage, elapsed);
+        file.flush();
+    }
+}
+
+std::wstring jarkUtils::SelectFolder(HWND hWnd) {
+    // lpszTitle 要活到 SHBrowseForFolder 返回：getUIStringW 按值返回，先存一份 wstring
+    const std::wstring title = getUIStringW(181).str();
+
+    BROWSEINFOW browseInfo{};
+    browseInfo.hwndOwner = hWnd;
+    browseInfo.lpszTitle = title.c_str();
+    browseInfo.ulFlags = BIF_RETURNONLYFSDIRS | BIF_USENEWUI;
+
+    LPITEMIDLIST itemList = SHBrowseForFolderW(&browseInfo);
+    if (!itemList)
+        return {};
+
+    wchar_t path[MAX_PATH] = {};
+    const bool ok = SHGetPathFromIDListW(itemList, path) == TRUE;
+    CoTaskMemFree(itemList);
+    return ok ? std::wstring(path) : std::wstring();
+}
+
+// ext需要带点 ".png"
+static bool isExt(const std::wstring& path, const std::wstring& ext) {
+    if (ext.empty() || path.length() <= ext.length())
+        return false;
+
+    size_t dotPos = path.find_last_of(L'.');
+    if (dotPos == std::wstring::npos || dotPos != (path.length() - ext.length()))
+        return false;
+
+    std::wstring fileExt = path.substr(dotPos);
+    return std::equal(fileExt.begin(), fileExt.end(), ext.begin(),
+        [](wchar_t a, wchar_t b) {
+            return std::tolower(a) == b;
+        });
+}
+
+// 图像另存为 选取文件路径 bool: isJPG
+std::pair<std::wstring, bool> jarkUtils::saveImageDialogW(wstring_view title) {
+    OPENFILENAMEW ofn{};
+    wchar_t szFile[520] = { 0 };
+
+    // 配置对话框参数
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = NULL;
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = ARRAYSIZE(szFile);  // 使用字符数而非字节数
+    ofn.lpstrFilter = L"JPG\0*.jpg\0PNG\0*.png\0All\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.lpstrTitle = title.data();
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
+
+    // 显示保存对话框
+    if (!GetSaveFileNameW(&ofn)) {
+        return { L"", false};  // 用户取消操作
+    }
+
+    // 确保文件扩展名正确
+    std::wstring filePath = szFile;
+    bool isJPG = true;
+
+    if (ofn.nFilterIndex == 1) {
+        if (!isExt(filePath, L".jpg") and !isExt(filePath, L".jpeg"))
+            filePath += L".jpg";
+    }
+    else if (ofn.nFilterIndex == 2) {
+        isJPG = false;
+        if(!isExt(filePath, L".png"))
+            filePath += L".png";
+    }
+    else {
+        filePath += L".jpg";  // 默认添加 .jpg 扩展名
+    }
+
+    return { filePath, isJPG };
+}
+
+// 视频另存为 选取文件路径
+std::wstring jarkUtils::saveVideoDialogW(wstring_view title, wstring_view defaultFileName,
+    wstring_view defaultExtension) {
+    OPENFILENAMEW ofn{};
+    wchar_t szFile[520] = {};
+
+    if (!defaultFileName.empty()) {
+        const size_t length = (std::min)(defaultFileName.size(), static_cast<size_t>(ARRAYSIZE(szFile) - 1));
+        wcsncpy_s(szFile, defaultFileName.data(), length);
+    }
+
+    // 过滤器按扩展名给出（默认项与 defaultExtension 一致），用户改选另一项时按所选补扩展名
+    static constexpr wchar_t mp4Filter[] = L"MP4\0*.mp4\0QuickTime\0*.mov\0All\0*.*\0";
+    static constexpr wchar_t movFilter[] = L"QuickTime\0*.mov\0MP4\0*.mp4\0All\0*.*\0";
+    const bool preferMov = (defaultExtension == L"mov");
+    const std::wstring extension = defaultExtension.empty() ? L"mp4" : std::wstring(defaultExtension);
+
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = NULL;
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = ARRAYSIZE(szFile);
+    ofn.lpstrFilter = preferMov ? movFilter : mp4Filter;
+    ofn.nFilterIndex = 1;
+    ofn.lpstrDefExt = extension.c_str();
+    ofn.lpstrTitle = title.data();
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
+
+    if (!GetSaveFileNameW(&ofn))
+        return {};
+
+    std::wstring filePath = szFile;
+    // 用户手动输入的名字没带扩展名时，按所选过滤器补一个
+    const auto extensionOf = [](const std::wstring& path) {
+        const size_t dot = path.find_last_of(L'.');
+        const size_t slash = path.find_last_of(L"\\/");
+        if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash))
+            return std::wstring();
+        return path.substr(dot + 1);
+        };
+
+    if (extensionOf(filePath).empty())
+        filePath += L"." + (ofn.nFilterIndex == 1 ? extension : (preferMov ? L"mp4" : L"mov"));
+
+    return filePath;
+}
+
+void jarkUtils::openUrl(const wchar_t* url) {
+    SHELLEXECUTEINFOW sei = {
+        .cbSize = sizeof(sei),
+        .lpVerb = L"open",
+        .lpFile = url,
+        .nShow = SW_SHOWNORMAL,
+    };
+
+    ShellExecuteExW(&sei);
+}
+
+
+std::vector<std::string> jarkUtils::splitString(std::string_view str, std::string_view delim) {
+    if (str.empty()) return {};
+    if (delim.empty()) return { std::string(str) };
+
+    std::vector<std::string> res;
+    size_t nextDelimIdx, targetBeginIdx = 0;
+    while ((nextDelimIdx = str.find(delim, targetBeginIdx)) != std::string::npos) {
+        if (nextDelimIdx == targetBeginIdx) {
+            targetBeginIdx += delim.length();
+            continue;
+        }
+        res.emplace_back(str.substr(targetBeginIdx, nextDelimIdx - targetBeginIdx));
+        targetBeginIdx = nextDelimIdx + delim.length();
+    }
+    if (targetBeginIdx < str.length())
+        res.emplace_back(str.substr(targetBeginIdx, str.length() - targetBeginIdx));
+    return res;
+}
+
+void jarkUtils::stringReplace(std::string& src, std::string_view oldBlock, std::string_view newBlock) {
+    if (oldBlock.empty()) return;
+
+    size_t nextBeginIdx = 0, foundIdx;
+    while ((foundIdx = src.find(oldBlock, nextBeginIdx)) != std::string::npos) {
+        src.replace(foundIdx, oldBlock.length(), newBlock);
+        nextBeginIdx = foundIdx + newBlock.length();
+    }
+}
+
+std::vector<std::wstring> jarkUtils::splitWstring(std::wstring_view str, std::wstring_view delim) {
+    if (str.empty()) return {};
+    if (delim.empty()) return { std::wstring(str) };
+
+    std::vector<std::wstring> res;
+    size_t nextDelimIdx, targetBeginIdx = 0;
+    while ((nextDelimIdx = str.find(delim, targetBeginIdx)) != std::wstring::npos) {
+        if (nextDelimIdx == targetBeginIdx) {
+            targetBeginIdx += delim.length();
+            continue;
+        }
+        res.emplace_back(str.substr(targetBeginIdx, nextDelimIdx - targetBeginIdx));
+        targetBeginIdx = nextDelimIdx + delim.length();
+    }
+    if (targetBeginIdx < str.length())
+        res.emplace_back(str.substr(targetBeginIdx, str.length() - targetBeginIdx));
+    return res;
+}
+
+void jarkUtils::wstringReplace(std::wstring& src, std::wstring_view oldBlock, std::wstring_view newBlock) {
+    if (oldBlock.empty()) return;
+
+    size_t nextBeginIdx = 0, foundIdx;
+    while ((foundIdx = src.find(oldBlock, nextBeginIdx)) != std::wstring::npos) {
+        src.replace(foundIdx, oldBlock.length(), newBlock);
+        nextBeginIdx = foundIdx + newBlock.length();
+    }
+}
+
+void jarkUtils::activateWindow(HWND hwnd) {
+    if (hwnd) {
+        if (IsIconic(hwnd)) {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
+    }
+}
+
+// 获取当前程序的完整路径
+std::wstring jarkUtils::getCurrentAppPath() {
+    std::wstring path;
+    int bufferSize = MAX_PATH;
+
+    // 避免极端情况下死循环
+    while (bufferSize <= 32768) {
+        path.resize(bufferSize);
+        DWORD readLen = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+        if (readLen == 0) {
+            return L"";
+        }
+
+        // 实际路径长度可能更长
+        if (readLen >= path.size()) {
+            bufferSize *= 2;
+            continue;
+        }
+
+        // 调整到实际长度
+        path.resize(readLen);
+        return path;
+    }
+
+    return L"";
+}
+
+// 调用 Windows Explorer 来打开文件所在的文件夹并选中该文件
+void jarkUtils::openFileLocation(wstring_view filePath) {
+    namespace fs = std::filesystem;
+
+    std::error_code ec;
+    if (!fs::exists(filePath, ec) || ec) {
+        JARK_LOG(L"File not found: {}", filePath);
+        return;
+    }
+
+    fs::path absPath = fs::absolute(filePath, ec);
+    if (ec) {
+        JARK_LOG("Failed to get absolute path: {}", ec.message());
+        return;
+    }
+
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (FAILED(hr)) {
+        JARK_LOG("CoInitializeEx failed: 0x{:X}", hr);
+        return;
+    }
+
+    auto pidl = ILCreateFromPathW(absPath.wstring().c_str());
+    if (!pidl) {
+        CoUninitialize();
+        JARK_LOG("Get pidl failed.");
+        return;
+    }
+
+    SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
+
+    ILFree(pidl);
+    CoUninitialize();
+
+    return;
+}
+
+void jarkUtils::openFileProperties(wstring_view filePath) {
+    if (!std::filesystem::exists(filePath)) {
+        return;
+    }
+
+    SHELLEXECUTEINFOW sei = { sizeof(SHELLEXECUTEINFOW) };
+    sei.lpVerb = L"properties";
+    sei.lpFile = filePath.data();
+    sei.nShow = SW_SHOW;
+    sei.fMask = SEE_MASK_INVOKEIDLIST;
+
+    ShellExecuteExW(&sei);
+}
+
+bool jarkUtils::getSystemDarkMode() {
+    bool isDark = false;
+    HKEY hKey;
+
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    {
+        DWORD value = 0;
+        DWORD size = sizeof(value);
+        if (RegQueryValueExW(hKey, TEXT("AppsUseLightTheme"), NULL, NULL,
+            reinterpret_cast<LPBYTE>(&value), &size) == ERROR_SUCCESS)
+        {
+            isDark = (value == 0);
+        }
+        RegCloseKey(hKey);
+    }
+    return isDark;
+}
+
+// 图片文件列表排序：名称（自然序升序）/ 修改时间（新→旧）/ 文件大小（大→小）
+void jarkUtils::sortImageFileList(std::vector<std::wstring>& files, uint32_t sortMode, int& currentIndex) {
+    const std::wstring current = (currentIndex >= 0 && currentIndex < (int)files.size())
+        ? files[currentIndex] : std::wstring();
+
+    const auto fileName = [](const std::wstring& path) {
+        return std::filesystem::path(path).filename().wstring();
+    };
+
+    switch (std::clamp<uint32_t>(sortMode, 0, 2)) {
+    case 1: { // 修改时间：新的在前；取不到时间的排在最后，同刻按自然名称序
+        const auto stamp = [](const std::wstring& path) -> int64_t {
+            std::error_code ec;
+            const auto time = std::filesystem::last_write_time(path, ec);
+            if (ec)
+                return INT64_MIN;
+            return time.time_since_epoch().count();
+        };
+        std::vector<int64_t> stamps;
+        stamps.reserve(files.size());
+        for (const auto& path : files)
+            stamps.push_back(stamp(path));
+
+        std::vector<size_t> order(files.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            if (stamps[a] != stamps[b])
+                return stamps[a] > stamps[b];
+            return StrCmpLogicalW(fileName(files[a]).c_str(), fileName(files[b]).c_str()) < 0;
+        });
+        std::vector<std::wstring> sorted;
+        sorted.reserve(files.size());
+        for (const size_t index : order) sorted.emplace_back(std::move(files[index]));
+        files = std::move(sorted);
+    } break;
+
+    case 2: { // 文件大小：大的在前；取不到大小的排在最后
+        const auto bytes = [](const std::wstring& path) -> int64_t {
+            std::error_code ec;
+            const auto size = std::filesystem::file_size(path, ec);
+            return ec ? -1 : static_cast<int64_t>(size);
+        };
+        std::vector<int64_t> sizes;
+        sizes.reserve(files.size());
+        for (const auto& path : files)
+            sizes.push_back(bytes(path));
+
+        std::vector<size_t> order(files.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            if (sizes[a] != sizes[b])
+                return sizes[a] > sizes[b];
+            return StrCmpLogicalW(fileName(files[a]).c_str(), fileName(files[b]).c_str()) < 0;
+        });
+        std::vector<std::wstring> sorted;
+        sorted.reserve(files.size());
+        for (const size_t index : order) sorted.emplace_back(std::move(files[index]));
+        files = std::move(sorted);
+    } break;
+
+    default: // 名称：数字感知的自然排序（资源管理器习惯）
+        std::sort(files.begin(), files.end(), [&](const std::wstring& a, const std::wstring& b) {
+            return StrCmpLogicalW(fileName(a).c_str(), fileName(b).c_str()) < 0;
+        });
+        break;
+    }
+
+    if (!current.empty()) {
+        for (size_t i = 0; i < files.size(); ++i) {
+            if (files[i] == current) {
+                currentIndex = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+}
