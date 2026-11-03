@@ -132,7 +132,10 @@ cv::Mat loadEXR(std::wstring_view path, std::span<const uint8_t> buf)
 
     const cv::Mat luminance = 0.2126f * channels[0] + 0.7152f * channels[1] + 0.0722f * channels[2];
     const float white = whitePointOf(luminance);
-    const float scale = 1.0f / white;
+    // Only pull highlights down when there actually are any: a document whose
+    // values already sit in 0..1 is shown at its authored brightness, and one
+    // with a sky at 20.0 gets normalised instead of blowing out to white.
+    const float scale = white > 1.0f ? 1.0f / white : 1.0f;
 
     // Scale only the colour channels: alpha is already 0..1 and must not be
     // re-exposed. Order is B, G, R for OpenCV's default layout.
