@@ -64,6 +64,24 @@ cmake --build build --config Release
 
 或直接使用 GitHub Actions（push 即构建，产物在 Actions 页面 Artifacts）。
 
+## 上游版本（vendor pin）
+
+| 项 | 值 |
+|---|---|
+| 仓库 | [jark006/JarkViewer](https://github.com/jark006/JarkViewer) |
+| 上游 release | **v2.0**（2026-11-01） |
+| 源码 pin | `6252738`（v2.0 之后的 main tip，仅文档改动） |
+| 静态库 | `static_lib` release 的 `JarkViewer_static_lib_v2.0+.7z`（265,032,797 字节，2026-10-09 更新） |
+| 已 vendor | `jark/src/` 18 个 cpp + `jark/include/`（含 `resource.h`）；与 pin 逐字节一致 |
+| 未 vendor | `JarkViewer/src/main.cpp` 等 UI 层、ImGui、`ImageResampler.cpp`（UI-only） |
+
+升级步骤：
+
+1. 拉上游 main，确认 `JarkViewer/src/*.cpp` 与 `JarkViewer/include/` 的改动；
+2. 只把解码链路用到的文件同步进 `jark/`（UI 层不搬）——对照 `CMakeLists.txt` 的 `JARK_SRC` 列表；
+3. 若上游发了新的 `static_lib` 资产，同步改 `.github/workflows/build.yml` 里的下载 URL 与缓存 key（`jark-static-lib-v2.0-2026-10`），否则 CI 会继续用旧缓存；
+4. 跑 `test-identify.py` + `test-viewer.py` 回归（样本见 `test-samples/`）。
+
 ## 许可证
 
 GPL-3.0-or-later。解码核心源自 JarkViewer（GPL-3.0，版权归 jark006）。
