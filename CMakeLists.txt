@@ -21,7 +21,6 @@ set(JARK_SRC
     jark/src/PsdDecoder.cpp
     jark/src/VectorImage.cpp
     jark/src/blpDecoder.cpp
-    jark/src/ImageResampler.cpp
     jark/src/AiPrompt.cpp
     jark/src/tinyxml2.cpp
 )
