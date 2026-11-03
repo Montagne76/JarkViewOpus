@@ -53,14 +53,14 @@ static void LeoStringCopy(LPWSTR dst, UINT cchMax, const wchar_t* src)
 // No preload worker thread (a background decoder thread inside the DOpus
 // process is not worth the shutdown risk; DOpus drives file switching
 // synchronously anyway). LRU budget keeps repeat views instant.
-static jark::ImageDatabase* g_db = nullptr;
+static ImageDatabase* g_db = nullptr;
 
-static jark::ImageDatabase* GetDB()
+static ImageDatabase* GetDB()
 {
     EnterCriticalSection(&g_cs);
     if (!g_db)
     {
-        g_db = new (std::nothrow) jark::ImageDatabase(false /*startPreloadWorker*/);
+        g_db = new (std::nothrow) ImageDatabase(false /*startPreloadWorker*/);
         if (g_db)
             g_db->setByteBudget(256ull * 1024 * 1024);
     }
@@ -77,9 +77,9 @@ static void DestroyDB()
 }
 
 // Decode (or fetch from cache) one file. Returns nullptr on failure.
-static std::shared_ptr<jark::ImageAsset> LoadAsset(const std::wstring& path)
+static std::shared_ptr<ImageAsset> LoadAsset(const std::wstring& path)
 {
-    jark::ImageDatabase* db = GetDB();
+    ImageDatabase* db = GetDB();
     if (!db)
         return nullptr;
     try
