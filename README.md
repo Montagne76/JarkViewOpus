@@ -88,6 +88,26 @@ cmake --build build --config Release
 3. 若上游发了新的 `static_lib` 资产，同步改 `.github/workflows/build.yml` 里的下载 URL 与缓存 key（`jark-static-lib-v2.0-2026-10`），否则 CI 会继续用旧缓存；
 4. 跑 `test-identify.py` + `test-viewer.py` 回归（样本见 `test-samples/`）。
 
+## 要不要再接一种格式：怎么查
+
+决定接管某个格式前，先证明 Opus 那边确实没有。三步走，前两步可以自动化：
+
+1. **问插件自己**。`Viewers\` 下每个 DLL 都实现了 `DVP_IdentifyW`，它会把自己负责的扩展名回填到 `VIEWERPLUGININFOW.lpszHandleExts`。注意 `DVP_InitEx` 收的是 `DVPINITEXDATA*` 结构指针，传 `NULL` 会让多数第三方插件直接访问违例——而且 `DVP_IdentifyW` 在未 Init 的情况下本来就允许调用。工作目录下的 `probe-viewer.py` 干这件事，每个 DLL 跑在独立子进程里，崩溃不会带崩整轮扫描。
+2. **拿样本问插件**。有了扩展名清单还不够——`Animated GIF`、`Raw Digital Camera`、`movie.dll` 声明的扩展名是空的，靠内容嗅探。所以要用真实文件逐个调 `DVP_IdentifyFileW`。`probe-all.py` 会把 `Viewers\*.dll` × `test-samples/opus-probe/probe-*` 全交叉一遍，打印认领矩阵。样本由 `make-probe-samples.py` 按规范手写（本机没有 PIL/OpenCV），其中 `.tga` / `.pcx` 是**对照组**：这两个已知有插件，如果它们没被认领，是探测方法坏了，而不是格式没人支持。
+3. **剩下的才查文档**。前两步只覆盖第三方插件；Opus 内置于查看器的能力（BMP/PNG/JPEG/GIF/TIFF/PSD 预览图，以及 13 版新增的 DDS、AVIF，SVG 走 Edge）不在 `Viewers\` 里。旁证有三处：本机 `%APPDATA%\GPSoftware\Directory Opus\FileTypes\Groups\groups.oxr` 的 `Images` 群组成员、Opus 13 更新说明、以及官方论坛的格式请求帖。
+
+2026-11-03 的实测结论（Opus 13.23）：
+
+| 格式 | 第三方插件 | Opus 内置 | 结论 |
+|---|---|---|---|
+| `.tga` / `.pcx` | targa.dll / pcx.dll | — | 已有 |
+| `.jp2 .j2k` | j2k.dll | — | 已有 |
+| `.dds` | opuswic 声明 | 13 版原生新增 | 已有 |
+| `.webp` | WebP.dll（静态）| — | 静态已有，动图由本插件接管 |
+| `.psd` | — | 仅嵌入的预览缩略图 | 本插件接管 |
+| `.svg` | docs.dll(`*.*`) 转 Edge | Edge 预览 | 有，但是矢量交互式，接管反而降级 |
+| `.exr` `.hdr` `.qoi` `.pnm/.ppm/.pgm/.pbm` `.pfm` | **无** | **无** | 真正的空缺 |
+
 ## 许可证
 
 GPL-3.0-or-later。解码核心源自 JarkViewer（GPL-3.0，版权归 jark006）。
