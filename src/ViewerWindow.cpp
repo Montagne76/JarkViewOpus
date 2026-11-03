@@ -14,21 +14,30 @@
 
 #include <algorithm>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
 #include "JarkCore.h"
 #include "../jark/include/jarkUtils.h"
+#include "../jark/include/MediaPlayer.h"
 #include "../sdk/DirectoryOpusViewerPlugins.h"
 
 namespace
 {
     const wchar_t kViewerClass[] = L"JarkViewOpusViewerView";
-    const UINT_PTR kFrameTimer = 1;
+    const UINT_PTR kFrameTimer = 1;   // animation frame advance
+    const UINT_PTR kLiveTimer  = 2;   // poll the live-photo player
 
     // Viewer frames are kept at (near) native resolution; only extreme images
     // are capped so a single DIB cannot blow the process up.
     const int kViewerMaxDim = 8192;
+
+    // Live Photo video is decoded on demand, so it does not need native
+    // resolution: capping it keeps the per-frame BGR->BGRA conversion cheap
+    // enough to run inside the UI thread at 30fps.
+    const int kLiveMaxDim  = 2048;
+    const int kLivePollMs  = 10;      // ~60Hz; the player itself paces frames
 
     struct ViewerState
     {
@@ -46,12 +55,22 @@ namespace
         int                               dragPanX = 0;
         int                               dragPanY = 0;
         bool                              animating = false;
-        SIZE                              size = { 0, 0 };  // after rotation
+        SIZE                              baseSize = { 0, 0 };// still size at rotation 0
+        SIZE                              size = { 0, 0 };  // layout size, after rotation
         HBITMAP                           bmp = nullptr;     // cached DIB
-        int                               bmpFrame = -1;     // frame currently in bmp
+        SIZE                              bmpSize = { 0, 0 };// DIB pixel size; can differ from size
+        uint64_t                          frameGen = 0;      // bumped whenever the source frame changes
+        uint64_t                          bmpGen = 0;        // frameGen the DIB currently holds
         int                               bmpRotation = -1;  // rotation currently in bmp
         bool                              bmpHasAlpha = false;
         int                               tickLog = 0;       // log the first few timer ticks only
+
+        // Live Photo / Motion Photo
+        std::unique_ptr<jark::MediaPlayer> player;
+        bool                              live = false;      // asset carries playable video
+        bool                              playing = false;
+        bool                              playedOnce = false;
+        cv::Mat                           videoFrame;        // latest decoded frame; empty = show still
     };
 
     CRITICAL_SECTION          g_listCs;
@@ -77,8 +96,9 @@ namespace
             DeleteObject(st->bmp);
             st->bmp = nullptr;
         }
-        st->bmpFrame = -1;
+        st->bmpGen = 0;
         st->bmpRotation = -1;
+        st->bmpSize = { 0, 0 };
     }
 
     COLORREF QueryBgCol(HWND hwnd)
@@ -101,29 +121,73 @@ namespace
         SendMessageW(GetParent(hwnd), WM_NOTIFY, 0, reinterpret_cast<LPARAM>(&n));
     }
 
-    // Rebuild / refresh the cached DIB for the current frame. The DIB itself is
+    // Layout size = the still photo's size, rotated. Live-photo video keeps
+    // this layout so the pane does not resize when the clip starts (the clip is
+    // usually smaller than the photo and gets fitted inside).
+    SIZE LayoutSize(const ViewerState* st)
+    {
+        SIZE s = st->baseSize;
+        if (st->rotation == 90 || st->rotation == 270)
+        {
+            const LONG t = s.cx;
+            s.cx = s.cy;
+            s.cy = t;
+        }
+        return s;
+    }
+
+    // The picture to show right now, in priority order: the live-photo video
+    // frame that is currently playing -> the current animation frame -> the
+    // still (Motion Photo assets carry primaryFrame, not frames).
+    const cv::Mat* FrameSource(ViewerState* st)
+    {
+        if (!st)
+            return nullptr;
+        if (!st->videoFrame.empty())
+            return &st->videoFrame;
+        if (!st->asset)
+            return nullptr;
+        if (!st->asset->frames.empty())
+        {
+            if (st->cur < 0 || st->cur >= static_cast<int>(st->asset->frames.size()))
+                st->cur = 0;
+            return &st->asset->frames[st->cur];
+        }
+        if (!st->asset->primaryFrame.empty())
+            return &st->asset->primaryFrame;
+        return nullptr;
+    }
+
+    // Rebuild / refresh the cached DIB for the current source frame. The DIB is
     // reused when the geometry still matches, so switching frames is a memcpy
     // rather than a fresh full-size allocation.
     bool EnsureBmp(ViewerState* st)
     {
-        if (!st->asset || st->asset->frames.empty())
+        const cv::Mat* src = FrameSource(st);
+        if (!src || src->empty())
             return false;
 
-        if (st->cur < 0 || st->cur >= static_cast<int>(st->asset->frames.size()))
-            st->cur = 0;
-
-        if (st->bmp && st->bmpFrame == st->cur && st->bmpRotation == st->rotation)
+        if (st->bmp && st->bmpGen == st->frameGen && st->bmpRotation == st->rotation)
             return true;
 
+        // Video frames are opaque, so skip the premultiply pass.
+        const bool isVideo = !st->videoFrame.empty();
         SIZE sz = { 0, 0 };
         bool alpha = false;
-        if (!MatToDIBReuse(st->asset->frames[st->cur], st->rotation, true, kViewerMaxDim,
+        if (!MatToDIBReuse(*src, st->rotation, !isVideo,
+                           isVideo ? kLiveMaxDim : kViewerMaxDim,
                            &st->bmp, &sz, &alpha))
             return false;
-        st->bmpFrame = st->cur;
+        st->bmpGen = st->frameGen;
         st->bmpRotation = st->rotation;
         st->bmpHasAlpha = alpha;
-        st->size = sz;
+        st->bmpSize = sz;
+        // During playback the layout keeps the still's size, so the pane never
+        // jumps between the photo and its clip; Paint fits the frame inside.
+        if (!isVideo)
+            st->size = sz;
+        else if (st->size.cx <= 0 || st->size.cy <= 0)
+            st->size = LayoutSize(st);
         return true;
     }
 
@@ -197,31 +261,116 @@ namespace
         st->animating = false;
     }
 
+    // ---------------------------------------------------------------------
+    // Live Photo / Motion Photo
+    //
+    // Upstream hands the video to us as plain bytes on the asset (trailer MP4
+    // for Android/Samsung JPEGs, sidecar .MOV for Apple/VIVO HEIC, or the
+    // members of an .livp zip). MediaPlayer streams those bytes with its own
+    // decode threads and an audio-master clock, so we only poll for frames
+    // instead of ever holding a decoded clip in memory.
+    // ---------------------------------------------------------------------
+
+    void StopLive(ViewerState* st)
+    {
+        if (st->hwnd)
+            KillTimer(st->hwnd, kLiveTimer);
+        st->playing = false;
+        if (st->player)
+            st->player->stop();
+    }
+
+    void StartLive(ViewerState* st)
+    {
+        if (!st->asset || !st->live || !st->asset->videoSource)
+            return;
+
+        const std::vector<uint8_t>& data = st->asset->videoSource->data;
+        if (data.empty())
+            return;
+
+        if (!st->player)
+            st->player = jark::MediaPlayer::create();
+        if (!st->player)
+        {
+            JarkLog(L"Live: MediaPlayer::create failed");
+            return;
+        }
+
+        // Muted on purpose: the preview pane must stay silent while the user
+        // walks through a folder. The audio track still drives the clock.
+        if (!st->player->start(std::span<const uint8_t>(data.data(), data.size()), 0.0f))
+        {
+            JarkLog(L"Live: start failed (%zu bytes)", data.size());
+            return;
+        }
+
+        st->playing = true;
+        st->playedOnce = false;
+        SetTimer(st->hwnd, kLiveTimer, kLivePollMs, nullptr);
+        JarkLog(L"Live: playing %zu bytes, duration=%lldms audio=%d",
+                data.size(), static_cast<long long>(st->player->durationMs()),
+                st->player->hasAudio() ? 1 : 0);
+    }
+
+    // Playback reached the end: drop back to the still. The photo is the
+    // full-resolution frame, and freezing on the last video frame would look
+    // like a rendering glitch.
+    void FinishLive(ViewerState* st)
+    {
+        if (st->hwnd)
+            KillTimer(st->hwnd, kLiveTimer);
+        if (st->player)
+            st->player->stop();
+        st->playing = false;
+        st->playedOnce = true;
+        if (!st->videoFrame.empty())
+        {
+            st->videoFrame.release();
+            ++st->frameGen;
+        }
+    }
+
     void SetAsset(ViewerState* st, std::shared_ptr<ImageAsset> asset, const std::wstring& path)
     {
         StopAnimation(st);
+        StopLive(st);
+        st->videoFrame.release();
+        st->playedOnce = false;
+        ++st->frameGen;
         FreeBmp(st);
         st->asset = std::move(asset);
         st->path = path;
         st->cur = 0;
         st->durations.clear();
+        st->live = false;
 
-        if (!st->asset || st->asset->frames.empty())
+        if (!st->asset)
         {
+            st->size = { 0, 0 };
             JarkLog(L"SetAsset: empty asset for %s", path.c_str());
             return;
         }
 
+        st->live = IsLivePhotoAsset(*st->asset);
         st->durations.assign(st->asset->frameDurations.begin(), st->asset->frameDurations.end());
+
+        const cv::Mat& first = CurrentFrameOf(*st->asset);
+        st->baseSize = SIZE{ first.cols, first.rows };
+        st->size = LayoutSize(st);
+
         const bool dib = EnsureBmp(st);
-        JarkLog(L"SetAsset: %s frames=%zu durations=%zu dib=%d size=%dx%d",
-                path.c_str(), st->asset->frames.size(), st->durations.size(),
+        JarkLog(L"SetAsset: %s frames=%zu live=%d durations=%zu dib=%d size=%dx%d",
+                path.c_str(), st->asset->frames.size(), st->live ? 1 : 0, st->durations.size(),
                 dib ? 1 : 0, st->size.cx, st->size.cy);
         if (!dib)
             return;
 
         NotifySize(st->hwnd, st->size);
-        ScheduleFrame(st);
+        if (st->live)
+            StartLive(st);
+        else
+            ScheduleFrame(st);
         InvalidateRect(st->hwnd, nullptr, FALSE);
     }
 
@@ -262,6 +411,20 @@ namespace
         const int dx = client.left + (cw - dw) / 2 + st->panX;
         const int dy = client.top + (ch - dh) / 2 + st->panY;
 
+        // The layout box comes from the still image. For stills and animations
+        // the DIB fills it exactly; live-photo video is fitted inside it so a
+        // different aspect ratio letterboxes instead of distorting the face.
+        const int bw = st->bmpSize.cx > 0 ? st->bmpSize.cx : st->size.cx;
+        const int bh = st->bmpSize.cy > 0 ? st->bmpSize.cy : st->size.cy;
+        const double fit = std::min(static_cast<double>(dw) / bw,
+                                    static_cast<double>(dh) / bh);
+        int iw = static_cast<int>(bw * fit + 0.5);
+        int ih = static_cast<int>(bh * fit + 0.5);
+        if (iw < 1) iw = 1;
+        if (ih < 1) ih = 1;
+        const int ix = dx + (dw - iw) / 2;
+        const int iy = dy + (dh - ih) / 2;
+
         HDC mem = CreateCompatibleDC(dc);
         if (!mem)
         {
@@ -276,13 +439,13 @@ namespace
             bf.BlendOp = AC_SRC_OVER;
             bf.SourceConstantAlpha = 255;
             bf.AlphaFormat = AC_SRC_ALPHA; // source is premultiplied
-            AlphaBlend(dc, dx, dy, dw, dh, mem, 0, 0, st->size.cx, st->size.cy, bf);
+            AlphaBlend(dc, ix, iy, iw, ih, mem, 0, 0, bw, bh, bf);
         }
         else
         {
             SetStretchBltMode(dc, HALFTONE);
             SetBrushOrgEx(dc, 0, 0, nullptr);
-            StretchBlt(dc, dx, dy, dw, dh, mem, 0, 0, st->size.cx, st->size.cy, SRCCOPY);
+            StretchBlt(dc, ix, iy, iw, ih, mem, 0, 0, bw, bh, SRCCOPY);
         }
 
         SelectObject(mem, old);
@@ -303,6 +466,9 @@ namespace
         if (!asset)
         {
             StopAnimation(st);
+            StopLive(st);
+            st->videoFrame.release();
+            st->live = false;
             FreeBmp(st);
             st->asset.reset();
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -318,17 +484,7 @@ namespace
         info->dwFlags = DVPFIF_CanReturnViewer | DVPFIF_CanReturnThumbnail;
         info->wMajorType = DVPMajorType_Image;
         info->wMinorType = 0;
-        if (st && st->asset && !st->asset->frames.empty())
-        {
-            const cv::Mat& m = st->asset->frames.front();
-            info->szImageSize.cx = m.cols;
-            info->szImageSize.cy = m.rows;
-        }
-        else
-        {
-            info->szImageSize.cx = 0;
-            info->szImageSize.cy = 0;
-        }
+        info->szImageSize = st ? st->size : SIZE{ 0, 0 };
         info->iNumBits = 32;
         if (st && st->bmpHasAlpha)
             info->dwFlags |= DVPFIF_HasAlphaChannel;
@@ -342,6 +498,8 @@ namespace
         st->panX = 0;
         st->panY = 0;
         FreeBmp(st);
+        if (st->live && st->baseSize.cx > 0)
+            st->size = LayoutSize(st); // video frames do not update the layout
         if (EnsureBmp(st))
             NotifySize(st->hwnd, st->size);
         InvalidateRect(st->hwnd, nullptr, FALSE);
@@ -349,11 +507,12 @@ namespace
 
     HBITMAP CopyCurrent(ViewerState* st)
     {
-        if (!st || !st->asset || st->asset->frames.empty())
+        const cv::Mat* src = FrameSource(st);
+        if (!src || src->empty())
             return nullptr;
         SIZE sz = { 0, 0 };
         bool alpha = false;
-        return MatToDIB(st->asset->frames[st->cur], st->rotation, true, kViewerMaxDim, &sz, &alpha);
+        return MatToDIB(*src, st->rotation, st->videoFrame.empty(), kViewerMaxDim, &sz, &alpha);
     }
 
     LRESULT CALLBACK ViewerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -437,8 +596,18 @@ namespace
         case WM_LBUTTONDBLCLK:
             if (st)
             {
-                // Toggle between fit-to-window and 1:1. Opus's own double click
+                // A finished live photo replays on double click; everything else
+                // toggles fit-to-window <-> 1:1. Opus's own double click
                 // (usually "close viewer") is not forwarded from here.
+                if (st->live && st->playedOnce && !st->playing)
+                {
+                    JarkLog(L"dblclk: replay live photo");
+                    st->videoFrame.release();
+                    ++st->frameGen;
+                    StartLive(st);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
                 st->zoom = (st->zoom == ZOOM_FITPAGE || st->zoom == ZOOM_TILED)
                                ? ZOOM_ORIGINAL
                                : ZOOM_FITPAGE;
@@ -482,13 +651,14 @@ namespace
                 if (st->asset && st->asset->frames.size() > 1)
                 {
                     st->cur = (st->cur + 1) % static_cast<int>(st->asset->frames.size());
+                    ++st->frameGen;
                     if (st->tickLog < 5)
                     {
                         JarkLog(L"WM_TIMER: frame -> %d/%zu", st->cur, st->asset->frames.size());
                         ++st->tickLog;
                     }
-                    // No FreeBmp: EnsureBmp notices cur changed and rewrites the
-                    // existing DIB when the geometry matches.
+                    // No FreeBmp: EnsureBmp sees the new generation and rewrites
+                    // the existing DIB when the geometry matches.
                     InvalidateRect(hwnd, nullptr, FALSE);
                     ScheduleFrame(st);
                 }
@@ -496,6 +666,39 @@ namespace
                 {
                     st->animating = false;
                 }
+                return 0;
+            }
+
+            if (wParam == kLiveTimer && st)
+            {
+                if (!st->player)
+                {
+                    KillTimer(hwnd, kLiveTimer);
+                    st->playing = false;
+                    return 0;
+                }
+
+                cv::Mat frame;
+                if (st->player->acquireFrame(frame) && !frame.empty())
+                {
+                    st->videoFrame = std::move(frame);
+                    ++st->frameGen;
+                    if (st->tickLog < 5)
+                    {
+                        JarkLog(L"Live: frame %dx%d at %lldms", st->videoFrame.cols,
+                                st->videoFrame.rows, static_cast<long long>(st->player->positionMs()));
+                        ++st->tickLog;
+                    }
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+
+                if (st->player->hasFinished())
+                {
+                    JarkLog(L"Live: finished at %lldms", static_cast<long long>(st->player->positionMs()));
+                    FinishLive(st);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                return 0;
             }
             return 0;
 
@@ -572,6 +775,8 @@ namespace
                 st->panX = 0;
                 st->panY = 0;
                 FreeBmp(st);
+                if (st->live && st->baseSize.cx > 0)
+                    st->size = LayoutSize(st);
                 if (EnsureBmp(st))
                     NotifySize(hwnd, st->size);
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -590,12 +795,18 @@ namespace
             if (st)
             {
                 StopAnimation(st);
+                StopLive(st);
+                st->videoFrame.release();
+                ++st->frameGen;
                 FreeBmp(st);
+                st->live = false;
+                st->playedOnce = false;
                 st->asset.reset();
                 st->cur = 0;
                 st->panX = 0;
                 st->panY = 0;
                 st->dragging = false;
+                st->baseSize = { 0, 0 };
                 st->size = { 0, 0 };
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
@@ -612,6 +823,11 @@ namespace
             if (doomed)
             {
                 StopAnimation(doomed);
+                // Stop playback before the asset (which owns the video bytes the
+                // player was handed) dies with the state.
+                StopLive(doomed);
+                doomed->player.reset();
+                doomed->videoFrame.release();
                 FreeBmp(doomed);
                 if (g_listCsReady)
                 {

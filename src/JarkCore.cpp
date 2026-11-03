@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../jark/include/ImageDatabase.h"
+#include "../jark/include/MediaPlayer.h" // complete type of jark::VideoSource
 
 namespace
 {
@@ -147,6 +148,11 @@ std::shared_ptr<ImageAsset> JarkLoadAssetFromStream(LPSTREAM stream, const wchar
 bool IsAnimatedAsset(const ImageAsset& asset)
 {
     return asset.frames.size() > 1;
+}
+
+bool IsLivePhotoAsset(const ImageAsset& asset)
+{
+    return asset.videoSource && !asset.videoSource->data.empty();
 }
 
 void JarkLog(const wchar_t* fmt, ...)

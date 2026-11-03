@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "../jark/include/jarkUtils.h"
 #include "../jark/include/FormatSniffer.h"
@@ -44,7 +45,11 @@ static const wchar_t kPluginCopyright[]   = L"GPL-3.0-or-later";
 static const wchar_t kPluginURL[]         = L"https://github.com/Montagne76/JarkViewOpus";
 
 // Claimed extensions. (.webp/.gif intentionally omitted: Opus 13 handles them.)
-static const wchar_t kHandleExts[] = L".heic;.heif;.avif;.avifs;.jxl;.apng";
+// .jpg/.jpeg are listed so Android/Samsung Motion Photos can be reached, but
+// identify only claims them when a motion-photo marker or a sidecar video is
+// present - plain JPEGs stay on Opus's faster internal path.
+static const wchar_t kHandleExts[] =
+    L".heic;.heif;.avif;.avifs;.jxl;.apng;.livp;.jpg;.jpeg";
 
 static HINSTANCE        g_hModuleInstance = nullptr;
 static CRITICAL_SECTION g_cs;
@@ -82,6 +87,60 @@ static bool HasAnimChunk(const uint8_t* d, size_t n)
     return false;
 }
 
+// Same-name sidecar video (Apple / VIVO export the clip next to the photo).
+static bool HasSidecarVideo(const wchar_t* path)
+{
+    if (!path || !*path)
+        return false;
+
+    std::wstring base(path);
+    const size_t slash = base.find_last_of(L"\\/");
+    const size_t dot   = base.find_last_of(L'.');
+    if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash))
+        base.resize(dot);
+
+    static const wchar_t* kVideoExts[] = { L".mov", L".MOV", L".mp4", L".MP4" };
+    for (const wchar_t* ext : kVideoExts)
+    {
+        const DWORD attr = GetFileAttributesW((base + ext).c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
+            return true;
+    }
+    return false;
+}
+
+// Android / Samsung Motion Photo markers. The XMP packet sits in an APP1
+// segment, i.e. within the first kilobytes of the file, so the head buffer is
+// enough to decide without scanning the whole JPEG.
+static bool HasMotionMarker(const uint8_t* d, size_t n)
+{
+    static const char* kMarks[] = {
+        "MotionPhoto=\"1\"",                 // Android / Samsung XMP
+        "Item:Semantic=\"MotionPhoto\"",     // Android XMP container directory
+        "MicroVideo=\"1\"",                  // older Android (MicroVideo)
+        "MicroVideoOffset",                  // older Android (MicroVideo)
+        "MotionPhoto_Data",                  // Samsung SEFT trailer
+    };
+    for (const char* mark : kMarks)
+    {
+        const size_t len = strlen(mark);
+        if (len == 0 || n < len)
+            continue;
+        for (size_t i = 0; i + len <= n; ++i)
+        {
+            if (memcmp(d + i, mark, len) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
+static bool IsExt(const wchar_t* path, const wchar_t* ext)
+{
+    const wchar_t* dot = path ? wcsrchr(path, L'.') : nullptr;
+    return dot && _wcsicmp(dot, ext) == 0;
+}
+
 static bool SniffSupported(const uint8_t* d, size_t n, const wchar_t* path)
 {
     if (n < 12)
@@ -99,6 +158,15 @@ static bool SniffSupported(const uint8_t* d, size_t n, const wchar_t* path)
             // animation control chunk proves it is an APNG; plain PNGs stay with
             // Opus's faster internal path.
             return HasExt(path, L".apng") || HasAnimChunk(d, n);
+        case jark::FileFormat::Jpeg:
+            // A plain JPEG decodes faster inside Opus than through our core, so
+            // only claim files that prove they are a Motion Photo.
+            if (!IsExt(path, L".jpg") && !IsExt(path, L".jpeg"))
+                return false;
+            return HasMotionMarker(d, n) || HasSidecarVideo(path);
+        case jark::FileFormat::Livp:
+            // Zip container, but only .livp files are Live Photo packages.
+            return IsExt(path, L".livp");
         default:
             return false;
         }
@@ -109,15 +177,16 @@ static bool SniffSupported(const uint8_t* d, size_t n, const wchar_t* path)
     }
 }
 
-static void FillFileInfo(LPVIEWERPLUGINFILEINFOW lpVPFileInfo, const SIZE& size, bool animated,
+static void FillFileInfo(LPVIEWERPLUGINFILEINFOW lpVPFileInfo, const SIZE& size, bool needViewer,
                          bool hasAlpha)
 {
-    // Animations must NOT advertise CanReturnBitmap: if both are offered Opus
-    // takes the cheap static path (DVP_LoadBitmapW) and never asks for a viewer
-    // window, so the animation would show frame 1 forever. The official gifanim
-    // plugin advertises CanReturnThumbnail|CanReturnViewer only, for this reason.
+    // Animations and Live Photos must NOT advertise CanReturnBitmap: if both are
+    // offered Opus takes the cheap static path (DVP_LoadBitmapW) and never asks
+    // for a viewer window, so the picture stays on frame 1 forever. The official
+    // gifanim plugin advertises CanReturnThumbnail|CanReturnViewer only, for
+    // exactly this reason.
     DWORD flags = DVPFIF_CanReturnThumbnail;
-    if (animated)
+    if (needViewer)
         flags |= DVPFIF_CanReturnViewer;
     else
         flags |= DVPFIF_CanReturnBitmap;
@@ -223,8 +292,8 @@ __declspec(dllexport) BOOL DVP_IdentifyW(LPVIEWERPLUGININFOW lpVPInfo)
 
 // Identify a local file: gate by magic bytes, decode once (result lands in the
 // LRU so LoadBitmap / the viewer window reuse it) and report the real size.
-// Animations additionally advertise DVPFIF_CanReturnViewer so DOpus creates
-// our painting window instead of its static image view.
+// Animations and Live Photos additionally advertise DVPFIF_CanReturnViewer so
+// DOpus creates our painting window instead of its static image view.
 __declspec(dllexport) BOOL DVP_IdentifyFileW(HWND /*hWnd*/, LPWSTR lpszName,
                                              LPVIEWERPLUGINFILEINFOW lpVPFileInfo,
                                              HANDLE /*hAbortEvent*/)
@@ -232,14 +301,16 @@ __declspec(dllexport) BOOL DVP_IdentifyFileW(HWND /*hWnd*/, LPWSTR lpszName,
     if (g_refCount == 0 || !lpVPFileInfo || !lpszName)
         return FALSE;
 
-    uint8_t header[96] = {};
+    // 128 KiB: enough for a JPEG's XMP packet, where the Motion Photo markers
+    // live. Header sniffing alone would not see them in the first 96 bytes.
+    std::vector<uint8_t> header(128 * 1024);
     size_t got = 0;
-    if (!ReadHeader(lpszName, header, sizeof(header), &got))
+    if (!ReadHeader(lpszName, header.data(), header.size(), &got))
     {
         JarkLog(L"IdentifyFileW: cannot read header (%s)", lpszName);
         return FALSE;
     }
-    if (!SniffSupported(header, got, lpszName))
+    if (!SniffSupported(header.data(), got, lpszName))
     {
         JarkLog(L"IdentifyFileW: sniff rejected (%s)", lpszName);
         return FALSE;
@@ -257,10 +328,15 @@ __declspec(dllexport) BOOL DVP_IdentifyFileW(HWND /*hWnd*/, LPWSTR lpszName,
         return FALSE;
 
     const bool animated = IsAnimatedAsset(*asset);
-    FillFileInfo(lpVPFileInfo, SIZE{ m.cols, m.rows }, animated, m.channels() == 4);
-    JarkLog(L"IdentifyFileW: OK %s frames=%zu durations=%zu size=%dx%d animated=%d flags=0x%08X",
-            lpszName, asset->frames.size(), asset->frameDurations.size(),
-            m.cols, m.rows, animated ? 1 : 0, lpVPFileInfo->dwFlags);
+    const bool live     = IsLivePhotoAsset(*asset);
+    // Both need a viewer window: an animation has frames to push, a live photo
+    // has a clip to stream.
+    FillFileInfo(lpVPFileInfo, SIZE{ m.cols, m.rows }, animated || live,
+                 m.channels() == 4);
+    JarkLog(L"IdentifyFileW: OK %s frames=%zu live=%d video=%zu bytes size=%dx%d flags=0x%08X",
+            lpszName, asset->frames.size(), live ? 1 : 0,
+            asset->videoSource ? asset->videoSource->data.size() : 0,
+            m.cols, m.rows, lpVPFileInfo->dwFlags);
     return TRUE;
 }
 
@@ -290,6 +366,9 @@ __declspec(dllexport) BOOL DVP_IdentifyFileStreamW(HWND /*hWnd*/, LPSTREAM lpStr
     // We cannot know the frame count without a full decode, and streaming a
     // whole animation just to identify it is wasteful. Advertise the viewer so
     // animation works for archives too; stills simply paint one frame.
+    // Motion Photo JPEGs are not detected here on purpose: they need a head
+    // scan for the XMP marker, and moving the stream position around for a
+    // member inside an archive is not worth it.
     FillFileInfo(lpVPFileInfo, SIZE{ 0, 0 }, true, false);
     return TRUE;
 }

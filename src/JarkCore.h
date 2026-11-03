@@ -29,6 +29,12 @@ void JarkShutdownDB();
 // True when the asset is a real animation (more than one frame).
 bool IsAnimatedAsset(const ImageAsset& asset);
 
+// True for Live Photo / Motion Photo: a still (primaryFrame) plus playable video
+// bytes. Upstream hands us the video either from a trailer MP4 (Android/Samsung
+// JPEG) or a sidecar .MOV/.MP4 with the same name (Apple/VIVO HEIC).
+// The bytes are owned by the asset, so the asset must outlive playback.
+bool IsLivePhotoAsset(const ImageAsset& asset);
+
 // The frame to display for a still viewer.
 const cv::Mat& CurrentFrameOf(const ImageAsset& asset);
 
