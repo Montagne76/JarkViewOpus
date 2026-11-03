@@ -103,6 +103,17 @@ namespace
         bool                              bmpHasAlpha = false;
         int                               tickLog = 0;       // log the first few timer ticks only
 
+        // Backing store. Painting straight onto the window DC exposed the bare
+        // background between the FillRect and the (slow, stretched) frame blit,
+        // which read as a white flash on every video frame.
+        HDC                               backDc = nullptr;
+        HBITMAP                           backBmp = nullptr;
+        HGDIOBJ                           backOld = nullptr;
+        int                               backW = 0;
+        int                               backH = 0;
+        COLORREF                          bgCol = CLR_INVALID;
+        HBRUSH                            bgBrush = nullptr;
+
         // Live Photo / Motion Photo
         std::shared_ptr<LiveSession>      session;
         bool                              live = false;      // asset carries playable video
@@ -436,6 +447,84 @@ namespace
         InvalidateRect(st->hwnd, nullptr, FALSE);
     }
 
+    void ReleaseBack(ViewerState* st)
+    {
+        if (!st)
+            return;
+        if (st->backDc)
+        {
+            if (st->backOld)
+                SelectObject(st->backDc, st->backOld);
+            st->backOld = nullptr;
+            DeleteDC(st->backDc);
+            st->backDc = nullptr;
+        }
+        if (st->backBmp)
+        {
+            DeleteObject(st->backBmp);
+            st->backBmp = nullptr;
+        }
+        st->backW = 0;
+        st->backH = 0;
+    }
+
+    // Backing store is a plain compatible bitmap: it has the screen's format, so
+    // the final BitBlt is a straight copy and AlphaBlend does not have to mix
+    // into a destination alpha channel.
+    bool EnsureBack(ViewerState* st, int w, int h)
+    {
+        if (!st)
+            return false;
+        if (st->backDc && st->backW == w && st->backH == h)
+            return true;
+
+        ReleaseBack(st);
+        if (w <= 0 || h <= 0)
+            return false;
+
+        HDC screen = GetDC(nullptr);
+        if (!screen)
+            return false;
+        HDC mem = CreateCompatibleDC(screen);
+        HBITMAP bmp = CreateCompatibleBitmap(screen, w, h);
+        ReleaseDC(nullptr, screen);
+
+        if (!mem || !bmp)
+        {
+            if (mem)
+                DeleteDC(mem);
+            if (bmp)
+                DeleteObject(bmp);
+            return false;
+        }
+
+        st->backDc = mem;
+        st->backBmp = bmp;
+        st->backOld = SelectObject(mem, bmp);
+        st->backW = w;
+        st->backH = h;
+        return true;
+    }
+
+    // Background brush follows the host theme (DVPN_GETBGCOL), cached so a 30fps
+    // repaint does not create and destroy a GDI object per frame.
+    HBRUSH BgBrush(ViewerState* st, HWND hwnd, COLORREF* outCol)
+    {
+        const COLORREF col = QueryBgCol(hwnd);
+        if (outCol)
+            *outCol = col;
+        if (!st)
+            return nullptr;
+        if (!st->bgBrush || st->bgCol != col)
+        {
+            if (st->bgBrush)
+                DeleteObject(st->bgBrush);
+            st->bgCol = col;
+            st->bgBrush = CreateSolidBrush(col);
+        }
+        return st->bgBrush;
+    }
+
     void Paint(HWND hwnd, ViewerState* st)
     {
         PAINTSTRUCT ps = {};
@@ -445,73 +534,84 @@ namespace
 
         RECT client = {};
         GetClientRect(hwnd, &client);
-
-        HBRUSH bg = CreateSolidBrush(QueryBgCol(hwnd));
-        FillRect(dc, &client, bg);
-        DeleteObject(bg);
-
-        if (!st || !EnsureBmp(st) || st->size.cx <= 0 || st->size.cy <= 0)
-        {
-            EndPaint(hwnd, &ps);
-            return;
-        }
-
         const int cw = client.right - client.left;
         const int ch = client.bottom - client.top;
-        if (cw <= 0 || ch <= 0)
+
+        // Compose the whole frame off-screen, then blit once. Drawing the
+        // background and the picture separately straight onto the window DC let
+        // the background show through between the two calls - visible as a white
+        // flicker at video frame rates.
+        COLORREF bgCol = 0;
+        HBRUSH bg = BgBrush(st, hwnd, &bgCol);
+        HBRUSH localBg = nullptr;
+        if (!bg)
         {
-            EndPaint(hwnd, &ps);
-            return;
+            localBg = CreateSolidBrush(bgCol);
+            bg = localBg;
         }
 
-        const double scale = ScaleOf(st, cw, ch);
+        const bool buffered = EnsureBack(st, cw, ch);
+        HDC target = buffered ? st->backDc : dc;
 
-        int dw = static_cast<int>(st->size.cx * scale + 0.5);
-        int dh = static_cast<int>(st->size.cy * scale + 0.5);
-        if (dw < 1) dw = 1;
-        if (dh < 1) dh = 1;
-        const int dx = client.left + (cw - dw) / 2 + st->panX;
-        const int dy = client.top + (ch - dh) / 2 + st->panY;
+        FillRect(target, &client, bg);
+        if (localBg)
+            DeleteObject(localBg);
 
-        // The layout box comes from the still image. For stills and animations
-        // the DIB fills it exactly; live-photo video is fitted inside it so a
-        // different aspect ratio letterboxes instead of distorting the face.
-        const int bw = st->bmpSize.cx > 0 ? st->bmpSize.cx : st->size.cx;
-        const int bh = st->bmpSize.cy > 0 ? st->bmpSize.cy : st->size.cy;
-        const double fit = std::min(static_cast<double>(dw) / bw,
-                                    static_cast<double>(dh) / bh);
-        int iw = static_cast<int>(bw * fit + 0.5);
-        int ih = static_cast<int>(bh * fit + 0.5);
-        if (iw < 1) iw = 1;
-        if (ih < 1) ih = 1;
-        const int ix = dx + (dw - iw) / 2;
-        const int iy = dy + (dh - ih) / 2;
-
-        HDC mem = CreateCompatibleDC(dc);
-        if (!mem)
+        bool drew = false;
+        if (st && EnsureBmp(st) && st->size.cx > 0 && st->size.cy > 0 && cw > 0 && ch > 0)
         {
-            EndPaint(hwnd, &ps);
-            return;
-        }
-        HGDIOBJ old = SelectObject(mem, st->bmp);
+            const double scale = ScaleOf(st, cw, ch);
 
-        if (st->bmpHasAlpha)
-        {
-            BLENDFUNCTION bf = {};
-            bf.BlendOp = AC_SRC_OVER;
-            bf.SourceConstantAlpha = 255;
-            bf.AlphaFormat = AC_SRC_ALPHA; // source is premultiplied
-            AlphaBlend(dc, ix, iy, iw, ih, mem, 0, 0, bw, bh, bf);
-        }
-        else
-        {
-            SetStretchBltMode(dc, HALFTONE);
-            SetBrushOrgEx(dc, 0, 0, nullptr);
-            StretchBlt(dc, ix, iy, iw, ih, mem, 0, 0, bw, bh, SRCCOPY);
+            int dw = static_cast<int>(st->size.cx * scale + 0.5);
+            int dh = static_cast<int>(st->size.cy * scale + 0.5);
+            if (dw < 1) dw = 1;
+            if (dh < 1) dh = 1;
+            const int dx = client.left + (cw - dw) / 2 + st->panX;
+            const int dy = client.top + (ch - dh) / 2 + st->panY;
+
+            // The layout box comes from the still image. For stills and animations
+            // the DIB fills it exactly; live-photo video is fitted inside it so a
+            // different aspect ratio letterboxes instead of distorting the face.
+            const int bw = st->bmpSize.cx > 0 ? st->bmpSize.cx : st->size.cx;
+            const int bh = st->bmpSize.cy > 0 ? st->bmpSize.cy : st->size.cy;
+            const double fit = std::min(static_cast<double>(dw) / bw,
+                                        static_cast<double>(dh) / bh);
+            int iw = static_cast<int>(bw * fit + 0.5);
+            int ih = static_cast<int>(bh * fit + 0.5);
+            if (iw < 1) iw = 1;
+            if (ih < 1) ih = 1;
+            const int ix = dx + (dw - iw) / 2;
+            const int iy = dy + (dh - ih) / 2;
+
+            HDC mem = CreateCompatibleDC(target);
+            if (mem)
+            {
+                HGDIOBJ old = SelectObject(mem, st->bmp);
+
+                if (st->bmpHasAlpha)
+                {
+                    BLENDFUNCTION bf = {};
+                    bf.BlendOp = AC_SRC_OVER;
+                    bf.SourceConstantAlpha = 255;
+                    bf.AlphaFormat = AC_SRC_ALPHA; // source is premultiplied
+                    drew = AlphaBlend(target, ix, iy, iw, ih, mem, 0, 0, bw, bh, bf) != FALSE;
+                }
+                else
+                {
+                    SetStretchBltMode(target, HALFTONE);
+                    SetBrushOrgEx(target, 0, 0, nullptr);
+                    drew = StretchBlt(target, ix, iy, iw, ih, mem, 0, 0, bw, bh, SRCCOPY) != FALSE;
+                }
+
+                SelectObject(mem, old);
+                DeleteDC(mem);
+            }
         }
 
-        SelectObject(mem, old);
-        DeleteDC(mem);
+        if (buffered)
+            BitBlt(dc, 0, 0, cw, ch, st->backDc, 0, 0, SRCCOPY);
+
+        (void)drew;
         EndPaint(hwnd, &ps);
     }
 
@@ -902,6 +1002,12 @@ namespace
                 StopLive(doomed);
                 doomed->videoFrame.release();
                 FreeBmp(doomed);
+                ReleaseBack(doomed);
+                if (doomed->bgBrush)
+                {
+                    DeleteObject(doomed->bgBrush);
+                    doomed->bgBrush = nullptr;
+                }
                 if (g_listCsReady)
                 {
                     EnterCriticalSection(&g_listCs);
