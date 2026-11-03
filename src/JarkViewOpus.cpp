@@ -60,13 +60,29 @@ static void LeoStringCopy(LPWSTR dst, UINT cchMax, const wchar_t* src)
 // Format gate
 // ---------------------------------------------------------------------------
 
-static bool IsApngExt(const wchar_t* path)
+static bool HasExt(const wchar_t* path, const wchar_t* ext)
 {
     const wchar_t* dot = path ? wcsrchr(path, L'.') : nullptr;
-    return dot && _wcsicmp(dot, L".apng") == 0;
+    return dot && _wcsicmp(dot, ext) == 0;
 }
 
-static bool SniffSupported(const uint8_t* d, size_t n, bool allowPng)
+// APNG carries an "acTL" (animation control) chunk before IDAT. A lot of APNGs
+// in the wild are saved as plain .png, and Opus's internal decoding would then
+// silently show frame 1 only - so claim PNGs that carry acTL regardless of name.
+static bool HasAnimChunk(const uint8_t* d, size_t n)
+{
+    static const char kActl[4] = { 'a', 'c', 'T', 'L' };
+    if (n < 41)
+        return false;
+    for (size_t i = 8; i + 4 <= n; ++i)
+    {
+        if (memcmp(d + i, kActl, 4) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool SniffSupported(const uint8_t* d, size_t n, const wchar_t* path)
 {
     if (n < 12)
         return false;
@@ -79,7 +95,10 @@ static bool SniffSupported(const uint8_t* d, size_t n, bool allowPng)
         case jark::FileFormat::Jxl:
             return true;
         case jark::FileFormat::Png:
-            return allowPng; // APNG only; plain .png is left to Opus
+            // .apng: trust the extension. .png (or anything else): only when the
+            // animation control chunk proves it is an APNG; plain PNGs stay with
+            // Opus's faster internal path.
+            return HasExt(path, L".apng") || HasAnimChunk(d, n);
         default:
             return false;
         }
@@ -180,6 +199,7 @@ __declspec(dllexport) BOOL DVP_IdentifyW(LPVIEWERPLUGININFOW lpVPInfo)
 
     lpVPInfo->dwFlags = DVPFIF_CanHandleStreams
                       | DVPFIF_CanHandleBytes
+                      | DVPFIF_OverrideInternal
                       | DVPFIF_ExtensionsOnlyIfSlow
                       | DVPFIF_ExtensionsOnlyIfNoRndSeek;
 
@@ -210,7 +230,7 @@ __declspec(dllexport) BOOL DVP_IdentifyFileW(HWND /*hWnd*/, LPWSTR lpszName,
     size_t got = 0;
     if (!ReadHeader(lpszName, header, sizeof(header), &got))
         return FALSE;
-    if (!SniffSupported(header, got, IsApngExt(lpszName)))
+    if (!SniffSupported(header, got, lpszName))
         return FALSE;
 
     auto asset = JarkLoadAsset(lpszName);
@@ -245,7 +265,7 @@ __declspec(dllexport) BOOL DVP_IdentifyFileStreamW(HWND /*hWnd*/, LPSTREAM lpStr
     ULONG read = 0;
     HRESULT hr = lpStream->Read(header, sizeof(header), &read);
     lpStream->Seek(restore, STREAM_SEEK_SET, nullptr);
-    if (FAILED(hr) || !SniffSupported(header, read, IsApngExt(lpszName)))
+    if (FAILED(hr) || !SniffSupported(header, read, lpszName))
         return FALSE;
 
     // We cannot know the frame count without a full decode, and streaming a
