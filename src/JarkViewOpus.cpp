@@ -106,6 +106,27 @@ static Fmt SniffFormat(const uint8_t* d, size_t n)
 // WIC helpers
 // ---------------------------------------------------------------------------
 
+// Cached WIC factory: CoCreateInstance per file is measurably slow on every
+// image switch. Created lazily, released when the last viewer instance goes.
+static IWICImagingFactory* g_wicFactory = nullptr;
+
+static IWICImagingFactory* GetWICFactory()
+{
+    LeoScopeLock lock;
+    if (!g_wicFactory)
+    {
+        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(&g_wicFactory))))
+            g_wicFactory = nullptr;
+    }
+    return g_wicFactory; // caller must not Release; lifetime managed here
+}
+
+// Preview cap: images larger than this are downscaled during decode. A 50MP
+// image would otherwise become a ~200MB DIB that DOpus then shrinks for
+// display, which is the main reason switching files felt slow.
+static const UINT kMaxDecodeDim = 4096;
+
 struct ScopedCOM
 {
     HRESULT hr;
@@ -125,10 +146,14 @@ static bool PixelFormatHasAlpha(REFGUID fmt)
 }
 
 // Decode the first frame of a decoder into a 32bpp top-down DIB.
+// Images larger than kMaxDecodeDim are downscaled with WICBitmapInterpolationModeFant
+// during decode, so the DIB stays small and DOpus's own fit-to-window scaling has
+// far fewer pixels to stretch.
 static HBITMAP DecodeFirstFrame(IWICImagingFactory* factory, IWICBitmapDecoder* decoder,
                                 LPSIZE lpszSize, LPVIEWERPLUGINFILEINFOW lpVPFileInfo)
 {
     IWICBitmapFrameDecode* frame = nullptr;
+    IWICBitmapScaler* scaler = nullptr;
     IWICFormatConverter* converter = nullptr;
     HBITMAP hBitmap = nullptr;
     HDC hdc = nullptr;
@@ -148,9 +173,38 @@ static HBITMAP DecodeFirstFrame(IWICImagingFactory* factory, IWICBitmapDecoder* 
         if (FAILED(frame->GetSize(&w, &h)) || w == 0 || h == 0)
             break;
 
+        const UINT origW = w, origH = h;
+
+        // Downscale huge images during decode (keep aspect ratio).
+        IWICBitmapSource* source = frame;
+        const UINT longest = (w > h) ? w : h;
+        if (longest > kMaxDecodeDim)
+        {
+            UINT tw = w, th = h;
+            if (w >= h)
+            {
+                tw = kMaxDecodeDim;
+                th = (UINT)((static_cast<ULONGLONG>(h) * kMaxDecodeDim + w / 2) / w);
+            }
+            else
+            {
+                th = kMaxDecodeDim;
+                tw = (UINT)((static_cast<ULONGLONG>(w) * kMaxDecodeDim + h / 2) / h);
+            }
+            if (tw >= 1 && th >= 1 &&
+                SUCCEEDED(factory->CreateBitmapScaler(&scaler)) &&
+                SUCCEEDED(scaler->Initialize(frame, tw, th, WICBitmapInterpolationModeFant)))
+            {
+                source = scaler;
+                w = tw;
+                h = th;
+            }
+            // If the scaler could not be created, fall back to full size decode.
+        }
+
         if (FAILED(factory->CreateFormatConverter(&converter)))
             break;
-        if (FAILED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA,
+        if (FAILED(converter->Initialize(source, GUID_WICPixelFormat32bppBGRA,
                                          WICBitmapDitherTypeNone, nullptr, 0.0,
                                          WICBitmapPaletteTypeCustom)))
             break;
@@ -193,6 +247,8 @@ static HBITMAP DecodeFirstFrame(IWICImagingFactory* factory, IWICBitmapDecoder* 
         DeleteDC(hdc);
     if (converter)
         converter->Release();
+    if (scaler)
+        scaler->Release();
     if (frame)
         frame->Release();
     return hBitmap;
@@ -254,6 +310,11 @@ __declspec(dllexport) void DVP_Uninit(void)
     LeoScopeLock lock;
     if (g_refCount > 0)
         --g_refCount;
+    if (g_refCount == 0 && g_wicFactory)
+    {
+        g_wicFactory->Release();
+        g_wicFactory = nullptr;
+    }
 }
 
 __declspec(dllexport) BOOL DVP_USBSafe(LPOPUSUSBSAFEDATA /*pUSBSafeData*/)
@@ -322,10 +383,9 @@ __declspec(dllexport) BOOL DVP_IdentifyFileW(HWND /*hWnd*/, LPWSTR lpszName,
     ScopedCOM com;
     if (!com.ok())
         return FALSE;
-    IWICImagingFactory* factory = nullptr;
+    IWICImagingFactory* factory = GetWICFactory();
     BOOL result = FALSE;
-    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                   IID_PPV_ARGS(&factory))))
+    if (factory)
     {
         SIZE size = {};
         if (WicCanDecodeFile(lpszName, factory, &size))
@@ -333,7 +393,6 @@ __declspec(dllexport) BOOL DVP_IdentifyFileW(HWND /*hWnd*/, LPWSTR lpszName,
             FillFileInfo(lpVPFileInfo, size, 32);
             result = TRUE;
         }
-        factory->Release();
     }
     return result;
 }
@@ -364,10 +423,9 @@ __declspec(dllexport) BOOL DVP_IdentifyFileStreamW(HWND /*hWnd*/, LPSTREAM lpStr
     ScopedCOM com;
     if (!com.ok())
         return FALSE;
-    IWICImagingFactory* factory = nullptr;
+    IWICImagingFactory* factory = GetWICFactory();
     BOOL result = FALSE;
-    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                   IID_PPV_ARGS(&factory))))
+    if (factory)
     {
         IWICBitmapDecoder* decoder = nullptr;
         if (SUCCEEDED(factory->CreateDecoderFromStream(lpStream, nullptr,
@@ -386,7 +444,6 @@ __declspec(dllexport) BOOL DVP_IdentifyFileStreamW(HWND /*hWnd*/, LPSTREAM lpStr
             }
             decoder->Release();
         }
-        factory->Release();
     }
     return result;
 }
@@ -401,10 +458,9 @@ __declspec(dllexport) HBITMAP DVP_LoadBitmapW(HWND /*hWnd*/, LPWSTR lpszName,
     ScopedCOM com;
     if (!com.ok())
         return nullptr;
-    IWICImagingFactory* factory = nullptr;
+    IWICImagingFactory* factory = GetWICFactory();
     HBITMAP hbmp = nullptr;
-    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                   IID_PPV_ARGS(&factory))))
+    if (factory)
     {
         IWICBitmapDecoder* decoder = nullptr;
         if (SUCCEEDED(factory->CreateDecoderFromFilename(lpszName, nullptr, GENERIC_READ,
@@ -413,7 +469,6 @@ __declspec(dllexport) HBITMAP DVP_LoadBitmapW(HWND /*hWnd*/, LPWSTR lpszName,
             hbmp = DecodeFirstFrame(factory, decoder, lpszSize, lpVPFileInfo);
             decoder->Release();
         }
-        factory->Release();
     }
     return hbmp;
 }
@@ -429,10 +484,9 @@ __declspec(dllexport) HBITMAP DVP_LoadBitmapStreamW(HWND /*hWnd*/, LPSTREAM lpSt
     ScopedCOM com;
     if (!com.ok())
         return nullptr;
-    IWICImagingFactory* factory = nullptr;
+    IWICImagingFactory* factory = GetWICFactory();
     HBITMAP hbmp = nullptr;
-    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                   IID_PPV_ARGS(&factory))))
+    if (factory)
     {
         IWICBitmapDecoder* decoder = nullptr;
         if (SUCCEEDED(factory->CreateDecoderFromStream(lpStream, nullptr,
@@ -441,7 +495,6 @@ __declspec(dllexport) HBITMAP DVP_LoadBitmapStreamW(HWND /*hWnd*/, LPSTREAM lpSt
             hbmp = DecodeFirstFrame(factory, decoder, lpszSize, lpVPFileInfo);
             decoder->Release();
         }
-        factory->Release();
     }
     return hbmp;
 }
