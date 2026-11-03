@@ -25,7 +25,11 @@ Directory Opus 查看器插件：在 DOpus 预览窗格内直接渲染 HEIC/HEIF
 1. 从 Actions 构建产物下载 `JarkViewOpus.dll`
 2. 复制到 `...\Directory Opus\Viewers\`
 3. 重启 DOpus，`Preferences / Plugins / Viewers` 中可见 **JarkViewOpus**
-4. 预览 `.heic` / `.avif` / `.jxl` / `.apng`
+4. 预览 `.heic` / `.avif` / `.jxl` / `.apng`（`.png` 只要含 APNG 的 `acTL` 块也会被接管）
+
+## 坑：插件列表置顶并不够
+
+Opus 的 **内置 WIC 图片例程优先于所有第三方查看器插件**，`Preferences / Plugins / Viewers` 里的顺序只决定第三方之间的先后。`.png` / `.gif` 这类内置支持的格式，插件必须声明 `DVPFIF_OverrideInternal`（`DVP_IdentifyW` 的 `dwFlags`）才能抢到文件——官方 `gifanim.dll` 就是靠这一条接管 `.gif` 的。少了它，`.apng` 会被 WIC 解码成静态第一帧。
 
 ## 注意
 
