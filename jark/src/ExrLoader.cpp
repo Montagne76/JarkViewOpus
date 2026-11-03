@@ -22,10 +22,20 @@
 
 #include "jarkUtils.h"
 
-// stb_image_write provides stbi_zlib_compress, which tinyexr references from its
-// encoder half. We never encode, but the implementation is one translation unit
-// and the symbol has to resolve. The decoder half uses stbi_zlib_decode_buffer,
-// already compiled by ImageDatabase.cpp via stb_image.h.
+// tinyexr's zlib work is delegated to stb, but the copy of stb_image compiled in
+// ImageDatabase.cpp does not export the symbol we need (it is compiled for the
+// loaders only and the zlib entry point is not pulled in). Rather than depend on
+// another translation unit's symbol visibility, compile a private static copy of
+// both stb headers right here: static linkage means no clash with the existing
+// implementations and no second look at the linker.
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+// stb drops its whole zlib section when STBI_NO_PNG is set without this, which
+// is exactly the entry point tinyexr needs.
+#define STBI_SUPPORT_ZLIB
+#include "stb_image.h"
+
+#define STB_IMAGE_WRITE_STATIC
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 

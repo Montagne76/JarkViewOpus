@@ -785,13 +785,14 @@ extern const char* EXRGetSpectralUnits(const EXRHeader *exr_header);
 // and whether they are in the include path, we don't include them here, and
 // instead declare the two relevant functions manually.
 // from stb_image.h:
-// [JarkViewOpus] extern "C" removed: stb_image.h/stb_image_write.h declare
-// these with C++ linkage, so an extern "C" declaration here would look for a
-// symbol that does not exist. This build compiles tinyexr inside a C++ TU that
-// includes the stb headers first, so plain C++ linkage is the matching one.
-int stbi_zlib_decode_buffer(char *obuffer, int olen, const char *ibuffer, int ilen);
+// [JarkViewOpus] extern "C" -> static: this build compiles a private static
+// copy of stb_image/stb_image_write in the same translation unit (STB_IMAGE_STATIC
+// makes stb's own definitions static), so the declarations must match that
+// linkage. extern "C" also looked for a symbol that the other translation unit
+// never exported.
+static int stbi_zlib_decode_buffer(char *obuffer, int olen, const char *ibuffer, int ilen);
 // from stb_image_write.h:
-unsigned char *stbi_zlib_compress(unsigned char *data, int data_len, int *out_len, int quality);
+static unsigned char *stbi_zlib_compress(unsigned char *data, int data_len, int *out_len, int quality);
 #endif
 
 
