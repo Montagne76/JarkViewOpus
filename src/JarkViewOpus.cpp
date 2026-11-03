@@ -351,11 +351,13 @@ __declspec(dllexport) BOOL DVP_IdentifyFileStreamW(HWND /*hWnd*/, LPSTREAM lpStr
     ULARGE_INTEGER cur = {};
     if (FAILED(lpStream->Seek(zero, STREAM_SEEK_CUR, &cur)))
         return FALSE;
+    LARGE_INTEGER restorePos = {};
+    restorePos.QuadPart = static_cast<LONGLONG>(cur.QuadPart);
 
     uint8_t header[96] = {};
     ULONG read = 0;
     HRESULT hr = lpStream->Read(header, sizeof(header), &read);
-    lpStream->Seek(cur, STREAM_SEEK_SET, nullptr);
+    lpStream->Seek(restorePos, STREAM_SEEK_SET, nullptr);
     if (FAILED(hr) || SniffFormat(header, read) == Fmt::None)
         return FALSE;
 
