@@ -224,79 +224,123 @@ const cv::Mat& CurrentFrameOf(const ImageAsset& asset)
     return asset.primaryFrame;
 }
 
-HBITMAP MatToDIB(const cv::Mat& srcIn, int rotation, bool premultiply, int maxDim,
-                 LPSIZE outSize, bool* outHasAlpha)
+namespace
 {
-    if (outHasAlpha)
-        *outHasAlpha = false;
-    if (srcIn.empty())
-        return nullptr;
-
-    cv::Mat src = srcIn;
-
-    if (maxDim > 0 && std::max(src.cols, src.rows) > maxDim)
+    // Shared conversion tail: any input depth / channel count -> 8-bit BGRA with
+    // the requested rotation and (optionally) premultiplied alpha.
+    bool ToBGRA(const cv::Mat& srcIn, int rotation, bool premultiply, int maxDim,
+                cv::Mat& out, bool* outHasAlpha)
     {
-        const double s = static_cast<double>(maxDim) /
-                         static_cast<double>(std::max(src.cols, src.rows));
-        cv::resize(src, src, cv::Size(), s, s, cv::INTER_AREA);
-    }
+        if (outHasAlpha)
+            *outHasAlpha = false;
+        if (srcIn.empty())
+            return false;
 
-    try
-    {
-        if (src.depth() != CV_8U)
+        cv::Mat src = srcIn;
+        try
         {
-            cv::Mat tmp;
-            double scale = 1.0;
-            if (src.depth() == CV_16U)
-                scale = 1.0 / 257.0;
-            else if (src.depth() == CV_32F || src.depth() == CV_64F)
-                scale = 255.0;
-            src.convertTo(tmp, CV_8U, scale);
-            src = tmp;
-        }
-
-        cv::Mat bgra;
-        switch (src.channels())
-        {
-        case 4: bgra = src; break;
-        case 3: cv::cvtColor(src, bgra, cv::COLOR_BGR2BGRA); break;
-        case 1: cv::cvtColor(src, bgra, cv::COLOR_GRAY2BGRA); break;
-        default:
-        {
-            cv::Mat tmp;
-            cv::cvtColor(src, tmp, cv::COLOR_BGR2BGRA);
-            bgra = tmp;
-            break;
-        }
-        }
-
-        const int rot = ((rotation % 360) + 360) % 360;
-        if (rot == 90)
-            cv::rotate(bgra, bgra, cv::ROTATE_90_CLOCKWISE);
-        else if (rot == 180)
-            cv::rotate(bgra, bgra, cv::ROTATE_180);
-        else if (rot == 270)
-            cv::rotate(bgra, bgra, cv::ROTATE_90_COUNTERCLOCKWISE);
-
-        if (premultiply && bgra.channels() == 4)
-        {
-            for (int y = 0; y < bgra.rows; ++y)
+            if (maxDim > 0 && std::max(src.cols, src.rows) > maxDim)
             {
-                uint8_t* p = bgra.ptr<uint8_t>(y);
-                for (int x = 0; x < bgra.cols; ++x, p += 4)
+                const double s = static_cast<double>(maxDim) /
+                                 static_cast<double>(std::max(src.cols, src.rows));
+                cv::resize(src, src, cv::Size(), s, s, cv::INTER_AREA);
+            }
+
+            if (src.depth() != CV_8U)
+            {
+                cv::Mat tmp;
+                double scale = 1.0;
+                if (src.depth() == CV_16U)
+                    scale = 1.0 / 257.0;
+                else if (src.depth() == CV_32F || src.depth() == CV_64F)
+                    scale = 255.0;
+                src.convertTo(tmp, CV_8U, scale);
+                src = tmp;
+            }
+
+            switch (src.channels())
+            {
+            case 4:  out = src; break;
+            case 3:  cv::cvtColor(src, out, cv::COLOR_BGR2BGRA); break;
+            case 1:  cv::cvtColor(src, out, cv::COLOR_GRAY2BGRA); break;
+            default: cv::cvtColor(src, out, cv::COLOR_BGR2BGRA); break;
+            }
+
+            const int rot = ((rotation % 360) + 360) % 360;
+            if (rot == 90)
+                cv::rotate(out, out, cv::ROTATE_90_CLOCKWISE);
+            else if (rot == 180)
+                cv::rotate(out, out, cv::ROTATE_180);
+            else if (rot == 270)
+                cv::rotate(out, out, cv::ROTATE_90_COUNTERCLOCKWISE);
+
+            if (premultiply && out.channels() == 4)
+            {
+                for (int y = 0; y < out.rows; ++y)
                 {
-                    const unsigned a = p[3];
-                    if (a == 255)
-                        continue;
-                    p[0] = static_cast<uint8_t>((p[0] * a + 127) / 255);
-                    p[1] = static_cast<uint8_t>((p[1] * a + 127) / 255);
-                    p[2] = static_cast<uint8_t>((p[2] * a + 127) / 255);
+                    uint8_t* p = out.ptr<uint8_t>(y);
+                    for (int x = 0; x < out.cols; ++x, p += 4)
+                    {
+                        const unsigned a = p[3];
+                        if (a == 255)
+                            continue;
+                        p[0] = static_cast<uint8_t>((p[0] * a + 127) / 255);
+                        p[1] = static_cast<uint8_t>((p[1] * a + 127) / 255);
+                        p[2] = static_cast<uint8_t>((p[2] * a + 127) / 255);
+                    }
                 }
             }
-        }
 
-        if (outHasAlpha)
-            *outHasAlpha = (bgra.channels() == 4);
+            if (outHasAlpha)
+                *outHasAlpha = (out.channels() == 4);
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    // Copy BGRA pixels into *inOut, reusing the DIB when its geometry matches.
+    // Animation frames are almost always the same size, and allocating a fresh
+    // full-size DIB for every frame is pure waste on large animations.
+    bool CopyToDIB(const cv::Mat& bgra, HBITMAP* inOut, SIZE* outSize)
+    {
+        if (bgra.empty())
+            return false;
+
+        const size_t stride = static_cast<size_t>(bgra.cols) * 4;
+        const size_t rows   = static_cast<size_t>(bgra.rows);
+
+        if (inOut && *inOut)
+        {
+            DIBSECTION ds = {};
+            if (GetObjectW(*inOut, sizeof(ds), &ds) == sizeof(ds) && ds.dsBm.bmBits &&
+                ds.dsBm.bmWidth == bgra.cols &&
+                static_cast<size_t>(ds.dsBm.bmWidthBytes) == stride &&
+                static_cast<size_t>(ds.dsBm.bmHeight) == rows)
+            {
+                uint8_t* dst = static_cast<uint8_t*>(ds.dsBm.bmBits);
+                if (bgra.isContinuous() && bgra.step == stride)
+                {
+                    memcpy(dst, bgra.data, stride * rows);
+                }
+                else
+                {
+                    for (int y = 0; y < bgra.rows; ++y)
+                        memcpy(dst + stride * y, bgra.ptr(y), stride);
+                }
+                if (outSize)
+                {
+                    outSize->cx = bgra.cols;
+                    outSize->cy = bgra.rows;
+                }
+                return true;
+            }
+
+            DeleteObject(*inOut);
+            *inOut = nullptr;
+        }
 
         BITMAPINFO bmi = {};
         bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
@@ -308,37 +352,70 @@ HBITMAP MatToDIB(const cv::Mat& srcIn, int rotation, bool premultiply, int maxDi
 
         HDC hdc = CreateCompatibleDC(nullptr);
         if (!hdc)
-            return nullptr;
+            return false;
         void* bits = nullptr;
         HBITMAP hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
         DeleteDC(hdc);
         if (!hBitmap || !bits)
         {
             DeleteObject(hBitmap);
-            return nullptr;
+            return false;
         }
 
-        const size_t dstStride = static_cast<size_t>(bgra.cols) * 4;
-        if (bgra.isContinuous() && static_cast<size_t>(bgra.step) == dstStride)
+        uint8_t* dst = static_cast<uint8_t*>(bits);
+        if (bgra.isContinuous() && bgra.step == stride)
         {
-            memcpy(bits, bgra.data, dstStride * static_cast<size_t>(bgra.rows));
+            memcpy(dst, bgra.data, stride * rows);
         }
         else
         {
-            uint8_t* dst = static_cast<uint8_t*>(bits);
             for (int y = 0; y < bgra.rows; ++y)
-                memcpy(dst + dstStride * y, bgra.ptr(y), dstStride);
+                memcpy(dst + stride * y, bgra.ptr(y), stride);
         }
 
+        if (inOut)
+            *inOut = hBitmap;
         if (outSize)
         {
             outSize->cx = bgra.cols;
             outSize->cy = bgra.rows;
         }
-        return hBitmap;
+        return true;
     }
-    catch (...)
+}
+
+HBITMAP MatToDIB(const cv::Mat& src, int rotation, bool premultiply, int maxDim,
+                 LPSIZE outSize, bool* outHasAlpha)
+{
+    cv::Mat bgra;
+    bool alpha = false;
+    if (!ToBGRA(src, rotation, premultiply, maxDim, bgra, &alpha))
     {
+        if (outHasAlpha)
+            *outHasAlpha = false;
         return nullptr;
     }
+    if (outHasAlpha)
+        *outHasAlpha = alpha;
+
+    HBITMAP hbmp = nullptr;
+    if (!CopyToDIB(bgra, &hbmp, outSize))
+        return nullptr;
+    return hbmp;
+}
+
+bool MatToDIBReuse(const cv::Mat& src, int rotation, bool premultiply, int maxDim,
+                   HBITMAP* inOut, LPSIZE outSize, bool* outHasAlpha)
+{
+    cv::Mat bgra;
+    bool alpha = false;
+    if (!ToBGRA(src, rotation, premultiply, maxDim, bgra, &alpha))
+    {
+        if (outHasAlpha)
+            *outHasAlpha = false;
+        return false;
+    }
+    if (outHasAlpha)
+        *outHasAlpha = alpha;
+    return CopyToDIB(bgra, inOut, outSize);
 }

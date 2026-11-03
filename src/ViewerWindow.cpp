@@ -10,6 +10,8 @@
 */
 #include "ViewerWindow.h"
 
+#include <windowsx.h>
+
 #include <algorithm>
 #include <memory>
 #include <string>
@@ -37,9 +39,17 @@ namespace
         int                               cur = 0;
         int                               rotation = 0;      // 0/90/180/270
         int                               zoom = ZOOM_FITPAGE;
+        int                               panX = 0;          // extra offset from centre, px
+        int                               panY = 0;
+        bool                              dragging = false;
+        POINT                             dragOrigin = {};
+        int                               dragPanX = 0;
+        int                               dragPanY = 0;
         bool                              animating = false;
         SIZE                              size = { 0, 0 };  // after rotation
-        HBITMAP                           bmp = nullptr;     // cached DIB for cur frame
+        HBITMAP                           bmp = nullptr;     // cached DIB
+        int                               bmpFrame = -1;     // frame currently in bmp
+        int                               bmpRotation = -1;  // rotation currently in bmp
         bool                              bmpHasAlpha = false;
         int                               tickLog = 0;       // log the first few timer ticks only
     };
@@ -67,6 +77,8 @@ namespace
             DeleteObject(st->bmp);
             st->bmp = nullptr;
         }
+        st->bmpFrame = -1;
+        st->bmpRotation = -1;
     }
 
     COLORREF QueryBgCol(HWND hwnd)
@@ -89,23 +101,27 @@ namespace
         SendMessageW(GetParent(hwnd), WM_NOTIFY, 0, reinterpret_cast<LPARAM>(&n));
     }
 
-    // Rebuild the cached DIB for the current frame/rotation.
+    // Rebuild / refresh the cached DIB for the current frame. The DIB itself is
+    // reused when the geometry still matches, so switching frames is a memcpy
+    // rather than a fresh full-size allocation.
     bool EnsureBmp(ViewerState* st)
     {
-        if (st->bmp)
-            return true;
         if (!st->asset || st->asset->frames.empty())
             return false;
 
         if (st->cur < 0 || st->cur >= static_cast<int>(st->asset->frames.size()))
             st->cur = 0;
 
+        if (st->bmp && st->bmpFrame == st->cur && st->bmpRotation == st->rotation)
+            return true;
+
         SIZE sz = { 0, 0 };
         bool alpha = false;
-        st->bmp = MatToDIB(st->asset->frames[st->cur], st->rotation, true, kViewerMaxDim,
-                           &sz, &alpha);
-        if (!st->bmp)
+        if (!MatToDIBReuse(st->asset->frames[st->cur], st->rotation, true, kViewerMaxDim,
+                           &st->bmp, &sz, &alpha))
             return false;
+        st->bmpFrame = st->cur;
+        st->bmpRotation = st->rotation;
         st->bmpHasAlpha = alpha;
         st->size = sz;
         return true;
@@ -119,6 +135,45 @@ namespace
         if (d < 20)
             d = 100; // 0/negative durations -> sane default
         return d;
+    }
+
+    // ZOOM_FITPAGE / ZOOM_TILED fit the window, ZOOM_ORIGINAL (0) means 1:1,
+    // anything else is a percentage. Getting this wrong makes Opus's "original
+    // size" button behave like "fit" - which is what it used to do here.
+    double ScaleOf(const ViewerState* st, int cw, int ch)
+    {
+        if (st->size.cx <= 0 || st->size.cy <= 0 || cw <= 0 || ch <= 0)
+            return 1.0;
+        if (st->zoom == ZOOM_FITPAGE || st->zoom == ZOOM_TILED)
+        {
+            const double s = std::min(static_cast<double>(cw) / st->size.cx,
+                                      static_cast<double>(ch) / st->size.cy);
+            return std::min(s, 4.0); // never blow tiny images up past 400%
+        }
+        if (st->zoom == ZOOM_ORIGINAL || st->zoom < 0)
+            return 1.0;
+        return st->zoom / 100.0;
+    }
+
+    // Keep the image from being dragged off its own centre: when it is smaller
+    // than the view it stays centred, otherwise pan is bounded to the overflow.
+    void ClampPan(ViewerState* st, int cw, int ch)
+    {
+        const double scale = ScaleOf(st, cw, ch);
+        const int dw = static_cast<int>(st->size.cx * scale + 0.5);
+        const int dh = static_cast<int>(st->size.cy * scale + 0.5);
+        const int mx = dw > cw ? (dw - cw + 1) / 2 : 0;
+        const int my = dh > ch ? (dh - ch + 1) / 2 : 0;
+        st->panX = std::clamp(st->panX, -mx, mx);
+        st->panY = std::clamp(st->panY, -my, my);
+    }
+
+    bool CanDrag(const ViewerState* st, int cw, int ch)
+    {
+        const double scale = ScaleOf(st, cw, ch);
+        const int dw = static_cast<int>(st->size.cx * scale + 0.5);
+        const int dh = static_cast<int>(st->size.cy * scale + 0.5);
+        return dw > cw || dh > ch;
     }
 
     void ScheduleFrame(ViewerState* st)
@@ -198,26 +253,14 @@ namespace
             return;
         }
 
-        double scale;
-        if (st->zoom == ZOOM_FITPAGE || st->zoom <= 0)
-        {
-            scale = std::min(static_cast<double>(cw) / st->size.cx,
-                             static_cast<double>(ch) / st->size.cy);
-            // Do not upscale tiny images to huge blurry blocks beyond 400%.
-            if (scale > 4.0)
-                scale = 4.0;
-        }
-        else
-        {
-            scale = static_cast<double>(st->zoom) / 100.0;
-        }
+        const double scale = ScaleOf(st, cw, ch);
 
         int dw = static_cast<int>(st->size.cx * scale + 0.5);
         int dh = static_cast<int>(st->size.cy * scale + 0.5);
         if (dw < 1) dw = 1;
         if (dh < 1) dh = 1;
-        const int dx = client.left + (cw - dw) / 2;
-        const int dy = client.top + (ch - dh) / 2;
+        const int dx = client.left + (cw - dw) / 2 + st->panX;
+        const int dy = client.top + (ch - dh) / 2 + st->panY;
 
         HDC mem = CreateCompatibleDC(dc);
         if (!mem)
@@ -296,6 +339,8 @@ namespace
         if (amount == 0)
             return;
         st->rotation = ((st->rotation + amount) % 360 + 360) % 360;
+        st->panX = 0;
+        st->panY = 0;
         FreeBmp(st);
         if (EnsureBmp(st))
             NotifySize(st->hwnd, st->size);
@@ -332,11 +377,99 @@ namespace
 
         case WM_SIZE:
         case WM_WINDOWPOSCHANGED:
+            if (st && msg == WM_SIZE)
+            {
+                RECT rc = {};
+                GetClientRect(hwnd, &rc);
+                ClampPan(st, rc.right, rc.bottom);
+            }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
 
         case WM_ERASEBKGND:
             return 1; // we paint the whole client area
+
+        case WM_LBUTTONDOWN:
+        {
+            if (!st)
+                return 0;
+            RECT rc = {};
+            GetClientRect(hwnd, &rc);
+            if (CanDrag(st, rc.right, rc.bottom))
+            {
+                st->dragging = true;
+                st->dragOrigin.x = GET_X_LPARAM(lParam);
+                st->dragOrigin.y = GET_Y_LPARAM(lParam);
+                st->dragPanX = st->panX;
+                st->dragPanY = st->panY;
+                SetCapture(hwnd);
+                SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+            }
+            return 0;
+        }
+
+        case WM_MOUSEMOVE:
+        {
+            if (!st || !st->dragging)
+                return 0;
+            RECT rc = {};
+            GetClientRect(hwnd, &rc);
+            st->panX = st->dragPanX + (GET_X_LPARAM(lParam) - st->dragOrigin.x);
+            st->panY = st->dragPanY + (GET_Y_LPARAM(lParam) - st->dragOrigin.y);
+            ClampPan(st, rc.right, rc.bottom);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+
+        case WM_LBUTTONUP:
+            if (st && st->dragging)
+            {
+                st->dragging = false;
+                ReleaseCapture();
+            }
+            return 0;
+
+        case WM_CAPTURECHANGED:
+            if (st)
+                st->dragging = false;
+            return 0;
+
+        case WM_LBUTTONDBLCLK:
+            if (st)
+            {
+                // Toggle between fit-to-window and 1:1. Opus's own double click
+                // (usually "close viewer") is not forwarded from here.
+                st->zoom = (st->zoom == ZOOM_FITPAGE || st->zoom == ZOOM_TILED)
+                               ? ZOOM_ORIGINAL
+                               : ZOOM_FITPAGE;
+                st->panX = 0;
+                st->panY = 0;
+                JarkLog(L"dblclk: zoom -> %d", st->zoom);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+
+        case WM_SETCURSOR:
+            if (st && LOWORD(lParam) == HTCLIENT)
+            {
+                if (st->dragging)
+                {
+                    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+                    return TRUE;
+                }
+                RECT rc = {};
+                GetClientRect(hwnd, &rc);
+                SetCursor(LoadCursorW(nullptr, CanDrag(st, rc.right, rc.bottom) ? IDC_HAND
+                                                                                : IDC_ARROW));
+                return TRUE;
+            }
+            break;
+
+        case WM_SETFOCUS:
+            // Do not steal focus from Opus (keyboard shortcuts / wheel paging).
+            if (GetParent(hwnd) && GetParent(hwnd) != hwnd)
+                SetFocus(GetParent(hwnd));
+            return 0;
 
         case WM_PAINT:
             Paint(hwnd, st);
@@ -354,7 +487,8 @@ namespace
                         JarkLog(L"WM_TIMER: frame -> %d/%zu", st->cur, st->asset->frames.size());
                         ++st->tickLog;
                     }
-                    FreeBmp(st);
+                    // No FreeBmp: EnsureBmp notices cur changed and rewrites the
+                    // existing DIB when the geometry matches.
                     InvalidateRect(hwnd, nullptr, FALSE);
                     ScheduleFrame(st);
                 }
@@ -406,13 +540,24 @@ namespace
             return 0;
 
         case DVPLUGINMSG_SETZOOM:
+            if (st)
+            {
+                st->zoom = static_cast<int>(static_cast<INT_PTR>(wParam));
+                st->panX = 0;
+                st->panY = 0;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return TRUE;
+
         case DVPLUGINMSG_ZOOM:
             if (st)
             {
-                st->zoom = static_cast<int>(wParam);
+                st->zoom = static_cast<int>(static_cast<INT_PTR>(wParam));
+                st->panX = 0;
+                st->panY = 0;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
-            return 0;
+            return TRUE; // Opus treats anything else as "zoom not supported"
 
         case DVPLUGINMSG_GETZOOMFACTOR:
             return st ? st->zoom : ZOOM_FITPAGE;
@@ -424,6 +569,8 @@ namespace
             if (st)
             {
                 st->rotation = ((static_cast<int>(wParam) % 360) + 360) % 360;
+                st->panX = 0;
+                st->panY = 0;
                 FreeBmp(st);
                 if (EnsureBmp(st))
                     NotifySize(hwnd, st->size);
@@ -446,6 +593,9 @@ namespace
                 FreeBmp(st);
                 st->asset.reset();
                 st->cur = 0;
+                st->panX = 0;
+                st->panY = 0;
+                st->dragging = false;
                 st->size = { 0, 0 };
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
@@ -495,7 +645,7 @@ namespace
 
         WNDCLASSEXW wc = {};
         wc.cbSize        = sizeof(wc);
-        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
         wc.lpfnWndProc   = ViewerProc;
         wc.hInstance     = inst;
         wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);

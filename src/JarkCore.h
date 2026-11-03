@@ -39,6 +39,11 @@ const cv::Mat& CurrentFrameOf(const ImageAsset& asset);
 HBITMAP MatToDIB(const cv::Mat& src, int rotation, bool premultiply, int maxDim,
                  LPSIZE outSize, bool* outHasAlpha);
 
+// Same conversion, but reuses *inOut when its geometry still matches. Animation
+// frames keep their size, so this avoids allocating a DIB per frame.
+bool MatToDIBReuse(const cv::Mat& src, int rotation, bool premultiply, int maxDim,
+                   HBITMAP* inOut, LPSIZE outSize, bool* outHasAlpha);
+
 // Append one line to %TEMP%\JarkViewOpus.log. Cheap, thread-safe, and useful
 // because a viewer plugin has no other way to talk back while inside Opus.
 // Setting JVO_NOLOG=1 in the environment disables it.
