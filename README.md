@@ -35,12 +35,18 @@ Directory Opus 查看器插件：在 DOpus 预览窗格内直接渲染 HEIC/HEIF
 
 行为：加载即自动播放一次（**静音**，音轨只用来驱动时钟），播完回到全分辨率静图；**双击重播**。
 
+### PSD / PSB 的认领条件
+
+Opus 内置对 PSD 只能画出文件里**嵌入的预览缩略图**（Photoshop 关掉「最大兼容性」时根本没有，且分辨率通常只有几百像素）。我们改读真正的合成图：上游 `decodePsdComposite` 支持 8/16 位与 Raw / PackBits / ZIP（含 prediction），遇到明确标记「未保存合成图」的文档会退回按图层合成；它解不了的情况（例如非 RGB 色彩模式）识别阶段返回 FALSE，文件仍然落回 Opus 的预览图，不会显示成空白。
+
+保护性上限：画布超过 **1 亿像素** 的不认领——合成图会是数百 MB 的 BGRA 缓冲，加上 OpenCV 的拷贝，全部发生在 Opus 进程里。
+
 ## 安装（测试）
 
 1. 从 Actions 构建产物下载 `JarkViewOpus.dll`
 2. 复制到 `...\Directory Opus\Viewers\`
 3. 重启 DOpus，`Preferences / Plugins / Viewers` 中可见 **JarkViewOpus**
-4. 预览 `.heic` / `.avif` / `.jxl` / `.apng` / `.livp` / 动图 `.webp`（`.png` 只要含 APNG 的 `acTL` 块也会被接管）
+4. 预览 `.heic` / `.avif` / `.jxl` / `.apng` / `.livp` / 动图 `.webp` / `.psd` / `.psb`（`.png` 只要含 APNG 的 `acTL` 块也会被接管）
 5. 实况照片：`.heic` + 同名 `.mov`、安卓 Motion Photo `.jpg`、或 `.livp` 都会在窗格里自动播放一次
 
 ## 坑：插件列表置顶并不够

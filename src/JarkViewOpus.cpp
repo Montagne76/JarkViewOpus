@@ -49,9 +49,10 @@ static const wchar_t kPluginURL[]         = L"https://github.com/Montagne76/Jark
 // handles it. .webp / .jpg are listed but gated in Judge() - any file a
 // plugin claims must be decoded by us, so only the variants Opus cannot show
 // correctly (animated WebP, Motion Photo JPEG) are claimed; stills stay on
-// Opus's faster internal path.
+// Opus's faster internal path. .psd/.psb are claimed because Opus only paints
+// the preview thumbnail baked into the file.
 static const wchar_t kHandleExts[] =
-    L".heic;.heif;.avif;.avifs;.jxl;.apng;.livp;.webp;.jpg;.jpeg";
+    L".heic;.heif;.avif;.avifs;.jxl;.apng;.livp;.webp;.jpg;.jpeg;.psd;.psb";
 
 static HINSTANCE        g_hModuleInstance = nullptr;
 static CRITICAL_SECTION g_cs;
@@ -218,6 +219,20 @@ static bool JpegReachedScan(const uint8_t* d, size_t n)
     return false;
 }
 
+// Photoshop canvas dimensions from the fixed header (26 bytes), used to keep
+// absurd documents away from the decoder: a 200 MP composite is a 800 MB bgra
+// buffer plus the OpenCV copy, and that would happen inside Opus's process.
+static constexpr uint64_t kPsdMaxPixels = 100ull * 1000 * 1000;
+
+static bool PsdDimensions(const uint8_t* d, size_t n, uint64_t& w, uint64_t& h)
+{
+    if (n < 26 || memcmp(d, "8BPS", 4) != 0)
+        return false;
+    h = (uint64_t(d[14]) << 24) | (uint64_t(d[15]) << 16) | (uint64_t(d[16]) << 8) | d[17];
+    w = (uint64_t(d[18]) << 24) | (uint64_t(d[19]) << 16) | (uint64_t(d[20]) << 8) | d[21];
+    return w && h;
+}
+
 static Verdict Judge(const uint8_t* d, size_t n, const wchar_t* path)
 {
     if (n < 12)
@@ -251,6 +266,24 @@ static Verdict Judge(const uint8_t* d, size_t n, const wchar_t* path)
         case jark::FileFormat::Livp:
             // Zip container, but only .livp files are Live Photo packages.
             return IsExt(path, L".livp") ? Verdict::Accept : Verdict::Reject;
+        case jark::FileFormat::Psd: {
+            // Opus can only paint the preview thumbnail baked into the file, and
+            // shows nothing at all when the document was saved without one, so
+            // the real composite is worth claiming. Sizes above the cap stay
+            // with Opus instead of risking a huge allocation in its process.
+            if (!IsExt(path, L".psd") && !IsExt(path, L".psb"))
+                return Verdict::Reject;
+            uint64_t w = 0, h = 0;
+            if (!PsdDimensions(d, n, w, h))
+                return Verdict::Reject;
+            if (w * h > kPsdMaxPixels)
+            {
+                JarkLog(L"IdentifyFileW: PSD %llux%llu over the pixel cap, leaving it to Opus (%s)",
+                        static_cast<unsigned long long>(w), static_cast<unsigned long long>(h), path);
+                return Verdict::Reject;
+            }
+            return Verdict::Accept;
+        }
         default:
             return Verdict::Reject;
         }
