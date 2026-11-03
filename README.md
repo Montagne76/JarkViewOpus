@@ -4,24 +4,33 @@ Directory Opus 查看器插件：在 DOpus 预览窗格内直接渲染 HEIC/HEIF
 
 解码核心移植自 [JarkViewer](https://github.com/jark006/JarkViewer)（GPL-3.0）。
 
-## 当前状态（Phase 0 骨架）
+## 当前状态
 
-- [x] 插件框架：`DVP_InitEx / DVP_IdentifyW / DVP_IdentifyFileW / DVP_LoadBitmapW` 全套接口
-- [x] 魔数嗅探（BMFF brand / JXL / WebP，逻辑对齐 JarkViewer FormatSniffer）
-- [x] 解码：Phase 0 暂用 **Windows WIC**（需系统装 HEIF/AVIF 编解码器扩展），识别时验证编解码器可用，解不了的文件自动放行给其他查看器
-- [ ] Phase 1：接入 JarkViewer 解码核心（libheif/libavif/libjxl），摆脱 WIC 依赖
-- [ ] Phase 2：动图循环播放（APNG / 动图 WebP / JXL / AVIF）
+- [x] 插件框架：`DVP_InitEx / DVP_IdentifyW / DVP_IdentifyFileW / DVP_LoadBitmapW` + `DVP_CreateViewer`
+- [x] 魔数嗅探（BMFF brand / JXL / PNG，逻辑对齐 JarkViewer FormatSniffer）
+- [x] **Phase 1**：接入 JarkViewer 解码核心（libheif / libavif / libjxl / OpenCV 静态库），零 WIC 依赖
+- [x] **Phase 2**：动图循环播放（APNG、动图 AVIF、动图 JXL）——自定义 viewer 窗口 + 定时器推帧
 - [ ] Phase 3：Motion Photo / Live Photo 窗格内播放（MediaDecoder + FFmpeg）
 - [ ] Phase 4：配置界面、打包、发布
+
+### 两条渲染路径
+
+| 文件类型 | 路径 | 缩放/平移/旋转 |
+|---|---|---|
+| 静态 HEIC / AVIF / JXL | `DVP_LoadBitmapW` 返回 HBITMAP | 由 DOpus 内置查看器负责 |
+| 动图（帧数 > 1） | `DVPFIF_CanReturnViewer` → `DVP_CreateViewer` 自绘窗口 + `SetTimer` 循环 | 插件自绘（适应窗口 / 缩放 / 90° 旋转） |
 
 ## 安装（测试）
 
 1. 从 Actions 构建产物下载 `JarkViewOpus.dll`
 2. 复制到 `...\Directory Opus\Viewers\`
 3. 重启 DOpus，`Preferences / Plugins / Viewers` 中可见 **JarkViewOpus**
-4. 预览一张 `.heic` / `.avif` / `.jxl` 验证
+4. 预览 `.heic` / `.avif` / `.jxl` / `.apng`
 
-Phase 0 WIC 依赖：Windows 设置 → 应用 → 可选功能 → 已安装的扩展，需要「HEIF 图像扩展」「HEVC 视频扩展」「AV1/AVIF 扩展」等。Phase 1 接入 JarkViewer 核心后不再需要。
+## 注意
+
+- 解码走 JarkViewer 预读线程（`ImageDatabase(true)` + `getSafePtr`）。**不要**改成 `ImageDatabase(false)` 或 `getDataPtr`——后者只轮询缓存，会空转 60 秒超时并卡死 DOpus 主线程。
+- 动图无播放控制条（v1 语义：打开即循环播放）。
 
 ## 构建
 
