@@ -394,8 +394,8 @@ __declspec(dllexport) HBITMAP DVP_LoadBitmapStreamW(HWND /*hWnd*/, LPSTREAM lpSt
         return nullptr;
 
     // Stream size.
-    LARGE_INTEGER zero = {}, end = {};
-    ULARGE_INTEGER cur = {};
+    LARGE_INTEGER zero = {};
+    ULARGE_INTEGER cur = {}, end = {};
     if (FAILED(lpStream->Seek(zero, STREAM_SEEK_CUR, &cur)) ||
         FAILED(lpStream->Seek(zero, STREAM_SEEK_END, &end)))
         return nullptr;
