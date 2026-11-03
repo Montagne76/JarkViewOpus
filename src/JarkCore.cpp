@@ -157,8 +157,9 @@ void JarkLog(const wchar_t* fmt, ...)
 
     InitOnceExecuteOnce(&once, [](PINIT_ONCE, PVOID, PVOID*) -> BOOL {
         InitializeCriticalSection(&cs);
+        // Opt-in only: normal use should not leave a log file behind.
         wchar_t v[8] = {};
-        enabled = (GetEnvironmentVariableW(L"JVO_NOLOG", v, 8) == 0);
+        enabled = (GetEnvironmentVariableW(L"JVO_LOG", v, 8) > 0);
         return TRUE;
     }, nullptr, nullptr);
     if (!enabled)
@@ -173,10 +174,23 @@ void JarkLog(const wchar_t* fmt, ...)
     SYSTEMTIME st = {};
     GetLocalTime(&st);
 
-    wchar_t dir[MAX_PATH] = {};
-    if (GetTempPathW(MAX_PATH, dir) == 0)
-        return;
-    const std::wstring file = std::wstring(dir) + L"JarkViewOpus.log";
+    // %LOCALAPPDATA% first: TEMP is redirected to a read-only location in some
+    // sandboxes, and this file also needs to be easy for a human to find.
+    std::wstring file;
+    wchar_t base[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH) > 0)
+    {
+        const std::wstring dir = std::wstring(base) + L"\\JarkViewOpus";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        file = dir + L"\\JarkViewOpus.log";
+    }
+    else
+    {
+        wchar_t dir[MAX_PATH] = {};
+        if (GetTempPathW(MAX_PATH, dir) == 0)
+            return;
+        file = std::wstring(dir) + L"JarkViewOpus.log";
+    }
 
     wchar_t line[1200] = {};
     const int chars = _snwprintf_s(line, _countof(line), _TRUNCATE,
