@@ -16,3 +16,7 @@ HWND JarkViewerCreate(HWND hwndParent, const RECT* rc, DWORD flags);
 
 // Destroys every live viewer window (called before the DLL unloads).
 void JarkViewerDestroyAll();
+
+// Waits (bounded) for in-flight live-photo player starts, which run on detached
+// worker threads inside FFmpeg. Must be called before the DLL unloads.
+void JarkViewerFlushLive();

@@ -13,9 +13,14 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "JarkCore.h"
@@ -38,6 +43,39 @@ namespace
     // enough to run inside the UI thread at 30fps.
     const int kLiveMaxDim  = 2048;
     const int kLivePollMs  = 10;      // ~60Hz; the player itself paces frames
+
+    // MediaPlayer::start() opens the audio device, and on a Bluetooth output
+    // that costs 400-800ms here. Calling it on the UI thread freezes Opus, so
+    // it runs on a worker while the still image stays on screen; the timer only
+    // starts reading frames once the worker reports ready.
+    struct LiveSession
+    {
+        std::shared_ptr<jark::MediaPlayer> player;
+        std::shared_ptr<ImageAsset>        keepAlive;  // owns the video bytes
+        std::atomic<bool>                  started{ false };
+        std::atomic<bool>                  cancelled{ false };
+    };
+
+    // Workers in flight, so DVP_Uninit can wait for them before the DLL goes
+    // away. Every worker touches FFmpeg, so nothing may outlive the module.
+    std::mutex              g_liveMtx;
+    std::condition_variable g_liveCv;
+    int                     g_liveRunning = 0;
+
+    void LiveBegin()
+    {
+        std::lock_guard<std::mutex> lk(g_liveMtx);
+        ++g_liveRunning;
+    }
+
+    void LiveEnd()
+    {
+        {
+            std::lock_guard<std::mutex> lk(g_liveMtx);
+            --g_liveRunning;
+        }
+        g_liveCv.notify_all();
+    }
 
     struct ViewerState
     {
@@ -66,7 +104,7 @@ namespace
         int                               tickLog = 0;       // log the first few timer ticks only
 
         // Live Photo / Motion Photo
-        std::unique_ptr<jark::MediaPlayer> player;
+        std::shared_ptr<LiveSession>      session;
         bool                              live = false;      // asset carries playable video
         bool                              playing = false;
         bool                              playedOnce = false;
@@ -276,8 +314,14 @@ namespace
         if (st->hwnd)
             KillTimer(st->hwnd, kLiveTimer);
         st->playing = false;
-        if (st->player)
-            st->player->stop();
+        if (st->session)
+        {
+            // The worker owns its own reference, so dropping ours is enough: it
+            // finishes start(), notices the cancellation, and tears the player
+            // down on its own thread. Nothing here ever blocks the UI.
+            st->session->cancelled.store(true);
+            st->session.reset();
+        }
     }
 
     void StartLive(ViewerState* st)
@@ -289,28 +333,43 @@ namespace
         if (data.empty())
             return;
 
-        if (!st->player)
-            st->player = jark::MediaPlayer::create();
-        if (!st->player)
+        auto session = std::make_shared<LiveSession>();
+        session->player = jark::MediaPlayer::create();
+        if (!session->player)
         {
             JarkLog(L"Live: MediaPlayer::create failed");
             return;
         }
-
-        // Muted on purpose: the preview pane must stay silent while the user
-        // walks through a folder. The audio track still drives the clock.
-        if (!st->player->start(std::span<const uint8_t>(data.data(), data.size()), 0.0f))
-        {
-            JarkLog(L"Live: start failed (%zu bytes)", data.size());
-            return;
-        }
-
-        st->playing = true;
+        session->keepAlive = st->asset; // the player reads the asset's bytes
+        st->session = session;
         st->playedOnce = false;
+
+        LiveBegin();
+        std::thread([session, bytes = data.size()]() {
+            // Muted on purpose: the preview pane must stay silent while the user
+            // walks through a folder. The audio track still drives the clock.
+            const std::vector<uint8_t>& buf = session->keepAlive->videoSource->data;
+            const bool ok = session->player->start(
+                std::span<const uint8_t>(buf.data(), buf.size()), 0.0f);
+            if (!ok)
+            {
+                JarkLog(L"Live: start failed (%zu bytes)", bytes);
+            }
+            else if (session->cancelled.load())
+            {
+                session->player.reset(); // drops the decoder threads right here
+            }
+            else
+            {
+                JarkLog(L"Live: playing %zu bytes, duration=%lldms audio=%d",
+                        bytes, static_cast<long long>(session->player->durationMs()),
+                        session->player->hasAudio() ? 1 : 0);
+                session->started.store(true);
+            }
+            LiveEnd();
+        }).detach();
+
         SetTimer(st->hwnd, kLiveTimer, kLivePollMs, nullptr);
-        JarkLog(L"Live: playing %zu bytes, duration=%lldms audio=%d",
-                data.size(), static_cast<long long>(st->player->durationMs()),
-                st->player->hasAudio() ? 1 : 0);
     }
 
     // Playback reached the end: drop back to the still. The photo is the
@@ -320,10 +379,13 @@ namespace
     {
         if (st->hwnd)
             KillTimer(st->hwnd, kLiveTimer);
-        if (st->player)
-            st->player->stop();
         st->playing = false;
         st->playedOnce = true;
+        if (st->session)
+        {
+            st->session->cancelled.store(true);
+            st->session.reset(); // player already finished; this just frees it
+        }
         if (!st->videoFrame.empty())
         {
             st->videoFrame.release();
@@ -671,30 +733,42 @@ namespace
 
             if (wParam == kLiveTimer && st)
             {
-                if (!st->player)
+                LiveSession* s = st->session.get();
+                if (!s)
                 {
                     KillTimer(hwnd, kLiveTimer);
                     st->playing = false;
                     return 0;
                 }
+                // Still opening the decoders / audio device on the worker.
+                if (!s->started.load())
+                    return 0;
+
+                if (!st->playing)
+                {
+                    st->playing = true;
+                    st->tickLog = 0;
+                    JarkLog(L"Live: first poll after start");
+                }
 
                 cv::Mat frame;
-                if (st->player->acquireFrame(frame) && !frame.empty())
+                if (s->player->acquireFrame(frame) && !frame.empty())
                 {
                     st->videoFrame = std::move(frame);
                     ++st->frameGen;
                     if (st->tickLog < 5)
                     {
                         JarkLog(L"Live: frame %dx%d at %lldms", st->videoFrame.cols,
-                                st->videoFrame.rows, static_cast<long long>(st->player->positionMs()));
+                                st->videoFrame.rows, static_cast<long long>(s->player->positionMs()));
                         ++st->tickLog;
                     }
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
 
-                if (st->player->hasFinished())
+                if (s->player->hasFinished())
                 {
-                    JarkLog(L"Live: finished at %lldms", static_cast<long long>(st->player->positionMs()));
+                    JarkLog(L"Live: finished at %lldms",
+                            static_cast<long long>(s->player->positionMs()));
                     FinishLive(st);
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
@@ -826,7 +900,6 @@ namespace
                 // Stop playback before the asset (which owns the video bytes the
                 // player was handed) dies with the state.
                 StopLive(doomed);
-                doomed->player.reset();
                 doomed->videoFrame.release();
                 FreeBmp(doomed);
                 if (g_listCsReady)
@@ -930,5 +1003,17 @@ void JarkViewerDestroyAll()
     {
         if (IsWindow(hwnd))
             DestroyWindow(hwnd);
+    }
+}
+
+void JarkViewerFlushLive()
+{
+    // Live-photo playback starts on a detached worker (see LiveSession). Those
+    // workers sit inside FFmpeg, so the module must not unload under them.
+    // Bounded: a wedged decoder must not hang Opus on shutdown.
+    std::unique_lock<std::mutex> lk(g_liveMtx);
+    if (!g_liveCv.wait_for(lk, std::chrono::seconds(5), [] { return g_liveRunning == 0; }))
+    {
+        JarkLog(L"FlushLive: %d player start(s) still running after 5s", g_liveRunning);
     }
 }

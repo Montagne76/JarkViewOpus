@@ -257,8 +257,10 @@ __declspec(dllexport) void DVP_Uninit(void)
     if (left == 0)
     {
         // Order matters: windows hold assets that live in the DB cache, and the
-        // DB owns the preload thread that must be joined before unload.
+        // DB owns the preload thread that must be joined before unload. Live
+        // photo players start on workers, so wait for those in between.
         JarkViewerDestroyAll();
+        JarkViewerFlushLive();
         JarkShutdownDB();
     }
 }
