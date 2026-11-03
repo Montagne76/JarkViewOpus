@@ -27,6 +27,8 @@ set(JARK_SRC
 
 add_library(JarkViewOpus SHARED
     src/JarkViewOpus.cpp
+    src/JarkCore.cpp
+    src/ViewerWindow.cpp
     ${JARK_SRC}
 )
 
@@ -74,6 +76,7 @@ target_link_libraries(JarkViewOpus PRIVATE
     oleaut32
     uuid
     gdi32
+    msimg32
     user32
     advapi32
     winmm

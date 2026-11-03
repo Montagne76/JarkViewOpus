@@ -1,9 +1,13 @@
 /*
    JarkViewOpus - Directory Opus Viewer Plugin
-   Phase 1: decode via the JarkViewer core (jark006/JarkViewer, GPL-3.0).
+   Decodes via the JarkViewer core (jark006/JarkViewer, GPL-3.0).
 
-   Identify decodes the image once (result cached in the ImageAsset LRU);
-   LoadBitmap then hits the cache, so each file is decoded exactly once.
+   Two rendering paths:
+     - Static images  -> DVP_LoadBitmapW returns an HBITMAP, DOpus's internal
+                         viewer handles zoom/pan/rotation.
+     - Animations     -> DVPFIF_CanReturnViewer makes DOpus create a viewer
+                         window (DVP_CreateViewer); we paint and drive frames
+                         with a timer (same model as the official GIF plugin).
 
    Plugin API: Directory Opus Viewer Plugin SDK (c) GP Software.
    License: GPL-3.0-or-later
@@ -11,12 +15,18 @@
 
 #include <windows.h>
 #include <objidl.h>
+#include <cwchar>
+#include <cwctype>
 #include <cstring>
 #include <algorithm>
 #include <memory>
+#include <string>
 
-#include "../jark/include/ImageDatabase.h"
+#include "../jark/include/jarkUtils.h"
 #include "../jark/include/FormatSniffer.h"
+
+#include "JarkCore.h"
+#include "ViewerWindow.h"
 
 #include "../sdk/DirectoryOpusViewerPlugins.h"
 
@@ -29,16 +39,16 @@ static const GUID GUIDPlugin_JarkViewOpus =
 { 0x9a7b3f42, 0x6c1d, 0x4e5a, { 0x8f, 0x2b, 0x3d, 0x9e, 0x1c, 0x7a, 0x5b, 0x60 } };
 
 static const wchar_t kPluginName[]        = L"JarkViewOpus";
-static const wchar_t kPluginDescription[] = L"Modern image formats via JarkViewer core (HEIC/AVIF/JXL) - JarkViewOpus";
+static const wchar_t kPluginDescription[] = L"Modern image formats via JarkViewer core (HEIC/AVIF/JXL/APNG) - JarkViewOpus";
 static const wchar_t kPluginCopyright[]   = L"GPL-3.0-or-later";
 static const wchar_t kPluginURL[]         = L"https://github.com/Montagne76/JarkViewOpus";
 
-// Claimed extensions. (.webp intentionally omitted: Opus 13 handles it internally.)
-static const wchar_t kHandleExts[] = L".heic;.heif;.avif;.avifs;.jxl";
+// Claimed extensions. (.webp/.gif intentionally omitted: Opus 13 handles them.)
+static const wchar_t kHandleExts[] = L".heic;.heif;.avif;.avifs;.jxl;.apng";
 
-static HINSTANCE       g_hModuleInstance = nullptr;
+static HINSTANCE        g_hModuleInstance = nullptr;
 static CRITICAL_SECTION g_cs;
-static int             g_refCount = 0;
+static int              g_refCount = 0;
 
 static void LeoStringCopy(LPWSTR dst, UINT cchMax, const wchar_t* src)
 {
@@ -47,164 +57,71 @@ static void LeoStringCopy(LPWSTR dst, UINT cchMax, const wchar_t* src)
 }
 
 // ---------------------------------------------------------------------------
-// JarkViewer core singleton
+// Format gate
 // ---------------------------------------------------------------------------
 
-// Upstream-architecture decode: a background preload worker decodes into the
-// LRU cache; getSafePtr() enqueues the request and waits for the result.
-// IMPORTANT: getDataPtr() alone only *polls the cache* (up to 60s) — it never
-// decodes anything itself. With no worker running it would spin 60s per call
-// and freeze the DOpus UI thread (the Phase-1 hang, fixed here).
-static ImageDatabase* g_db = nullptr;
-
-static ImageDatabase* GetDB()
+static bool IsApngExt(const wchar_t* path)
 {
-    EnterCriticalSection(&g_cs);
-    if (!g_db)
-    {
-        g_db = new (std::nothrow) ImageDatabase(true /*startPreloadWorker*/);
-        if (g_db)
-            g_db->setByteBudget(256ull * 1024 * 1024);
-    }
-    LeaveCriticalSection(&g_cs);
-    return g_db;
+    const wchar_t* dot = path ? wcsrchr(path, L'.') : nullptr;
+    return dot && _wcsicmp(dot, L".apng") == 0;
 }
 
-static void DestroyDB()
+static bool SniffSupported(const uint8_t* d, size_t n, bool allowPng)
 {
-    EnterCriticalSection(&g_cs);
-    delete g_db;
-    g_db = nullptr;
-    LeaveCriticalSection(&g_cs);
-}
-
-// Decode (or fetch from cache) one file. Returns nullptr on failure.
-static std::shared_ptr<ImageAsset> LoadAsset(const std::wstring& path)
-{
-    ImageDatabase* db = GetDB();
-    if (!db)
-        return nullptr;
+    if (n < 12)
+        return false;
     try
     {
-        return db->getSafePtr(path); // requestPreload + wait for the worker's decode
+        switch (jark::sniffFileFormat(std::span<const uint8_t>(d, n)))
+        {
+        case jark::FileFormat::Heif:
+        case jark::FileFormat::Avif:
+        case jark::FileFormat::Jxl:
+            return true;
+        case jark::FileFormat::Png:
+            return allowPng; // APNG only; plain .png is left to Opus
+        default:
+            return false;
+        }
     }
     catch (...)
     {
-        return nullptr;
-    }
-}
-
-static bool IsSupportedSniff(jark::FileFormat ff)
-{
-    switch (ff)
-    {
-    case jark::FileFormat::Heif:
-    case jark::FileFormat::Avif:
-    case jark::FileFormat::Jxl:
-        return true;
-    default:
         return false;
     }
 }
 
-// ---------------------------------------------------------------------------
-// cv::Mat -> 32bpp top-down DIB (BGRA)
-// ---------------------------------------------------------------------------
-
-// Preview cap: images larger than this are downscaled during the Mat->DIB
-// conversion so DOpus's fit-to-window scaling has far fewer pixels to stretch.
-static const int kMaxDecodeDim = 4096;
-
-static HBITMAP MatToDIB(const cv::Mat& srcIn, LPSIZE lpszSize, LPVIEWERPLUGINFILEINFOW lpVPFileInfo)
+static void FillFileInfo(LPVIEWERPLUGINFILEINFOW lpVPFileInfo, const SIZE& size, bool animated,
+                         bool hasAlpha)
 {
-    if (srcIn.empty())
-        return nullptr;
+    DWORD flags = DVPFIF_CanReturnBitmap | DVPFIF_CanReturnThumbnail;
+    if (animated)
+        flags |= DVPFIF_CanReturnViewer;
+    if (hasAlpha)
+        flags |= DVPFIF_HasAlphaChannel;
 
-    cv::Mat src = srcIn;
+    lpVPFileInfo->dwFlags    = flags;
+    lpVPFileInfo->wMajorType = DVPMajorType_Image;
+    lpVPFileInfo->wMinorType = 0;
+    lpVPFileInfo->szImageSize = size;
+    lpVPFileInfo->iNumBits   = 32;
+}
 
-    if (std::max(src.cols, src.rows) > kMaxDecodeDim)
-    {
-        const double s = static_cast<double>(kMaxDecodeDim) /
-                         static_cast<double>(std::max(src.cols, src.rows));
-        cv::resize(src, src, cv::Size(), s, s, cv::INTER_AREA);
-    }
-
-    // Normalize to 8-bit BGRA.
-    cv::Mat bgra;
-    try
-    {
-        if (src.depth() != CV_8U)
-        {
-            cv::Mat tmp;
-            double scale = 1.0;
-            if (src.depth() == CV_16U)      scale = 1.0 / 257.0;
-            else if (src.depth() == CV_32F || src.depth() == CV_64F) scale = 255.0;
-            src.convertTo(tmp, CV_8U, scale);
-            src = tmp;
-        }
-        switch (src.channels())
-        {
-        case 4: bgra = src; break;
-        case 3: cv::cvtColor(src, bgra, cv::COLOR_BGR2BGRA); break;
-        case 1: cv::cvtColor(src, bgra, cv::COLOR_GRAY2BGRA); break;
-        default:
-        {
-            cv::Mat tmp;
-            cv::cvtColor(src, tmp, cv::COLOR_BGR2BGRA);
-            bgra = tmp;
-            break;
-        }
-        }
-    }
-    catch (...)
-    {
-        return nullptr;
-    }
-
-    BITMAPINFO bmi = {};
-    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth       = bgra.cols;
-    bmi.bmiHeader.biHeight      = -bgra.rows; // top-down
-    bmi.bmiHeader.biPlanes      = 1;
-    bmi.bmiHeader.biBitCount    = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    HDC hdc = CreateCompatibleDC(nullptr);
-    if (!hdc)
-        return nullptr;
-    void* bits = nullptr;
-    HBITMAP hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    DeleteDC(hdc);
-    if (!hBitmap || !bits)
-    {
-        DeleteObject(hBitmap);
-        return nullptr;
-    }
-
-    const size_t dstStride = static_cast<size_t>(bgra.cols) * 4;
-    if (bgra.isContinuous() && static_cast<size_t>(bgra.step) == dstStride)
-    {
-        memcpy(bits, bgra.data, dstStride * static_cast<size_t>(bgra.rows));
-    }
-    else
-    {
-        uint8_t* dst = static_cast<uint8_t*>(bits);
-        for (int y = 0; y < bgra.rows; ++y)
-            memcpy(dst + dstStride * y, bgra.ptr(y), dstStride);
-    }
-
-    if (lpszSize)
-    {
-        lpszSize->cx = bgra.cols;
-        lpszSize->cy = bgra.rows;
-    }
-    if (lpVPFileInfo && srcIn.channels() == 4)
-        lpVPFileInfo->dwFlags |= DVPFIF_HasAlphaChannel;
-    return hBitmap;
+static bool ReadHeader(const wchar_t* path, uint8_t* buf, size_t cap, size_t* got)
+{
+    *got = 0;
+    HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return false;
+    DWORD read = 0;
+    const BOOL ok = ReadFile(hFile, buf, static_cast<DWORD>(cap), &read, nullptr);
+    CloseHandle(hFile);
+    *got = read;
+    return ok && read > 0;
 }
 
 // ---------------------------------------------------------------------------
-// DOpus viewer plugin exports
+// Exports
 // ---------------------------------------------------------------------------
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/)
@@ -239,9 +156,16 @@ __declspec(dllexport) void DVP_Uninit(void)
     EnterCriticalSection(&g_cs);
     if (g_refCount > 0)
         --g_refCount;
+    const int left = g_refCount;
     LeaveCriticalSection(&g_cs);
-    if (g_refCount == 0)
-        DestroyDB();
+
+    if (left == 0)
+    {
+        // Order matters: windows hold assets that live in the DB cache, and the
+        // DB owns the preload thread that must be joined before unload.
+        JarkViewerDestroyAll();
+        JarkShutdownDB();
+    }
 }
 
 __declspec(dllexport) BOOL DVP_USBSafe(LPOPUSUSBSAFEDATA /*pUSBSafeData*/)
@@ -249,15 +173,14 @@ __declspec(dllexport) BOOL DVP_USBSafe(LPOPUSUSBSAFEDATA /*pUSBSafeData*/)
     return TRUE;
 }
 
-// Identify the viewer plugin to DOpus.
 __declspec(dllexport) BOOL DVP_IdentifyW(LPVIEWERPLUGININFOW lpVPInfo)
 {
     if (!lpVPInfo || lpVPInfo->cbSize < VIEWERPLUGININFO_V4_SIZE)
         return FALSE;
 
-    lpVPInfo->dwFlags = DVPFIF_CanHandleStreams            // files inside Zip/FTP
-                      | DVPFIF_CanHandleBytes              // identify from header bytes
-                      | DVPFIF_ExtensionsOnlyIfSlow        // slow/non-seek: match by extension
+    lpVPInfo->dwFlags = DVPFIF_CanHandleStreams
+                      | DVPFIF_CanHandleBytes
+                      | DVPFIF_ExtensionsOnlyIfSlow
                       | DVPFIF_ExtensionsOnlyIfNoRndSeek;
 
     LeoStringCopy(lpVPInfo->lpszHandleExts,  lpVPInfo->cchHandleExtsMax,  kHandleExts);
@@ -268,38 +191,14 @@ __declspec(dllexport) BOOL DVP_IdentifyW(LPVIEWERPLUGININFOW lpVPInfo)
 
     lpVPInfo->dwlMinFileSize    = 16;
     lpVPInfo->uiMajorFileType   = DVPMajorType_Image;
-    lpVPInfo->idPlugin          = GUIDPlugin_JarkViewOpus;
+    lpVPInfo->idPlugin          = GUID_JarkViewOpus;
     return TRUE;
 }
 
-static void FillFileInfo(LPVIEWERPLUGINFILEINFOW lpVPFileInfo, const SIZE& size, int bits)
-{
-    lpVPFileInfo->dwFlags    = DVPFIF_CanReturnBitmap | DVPFIF_CanReturnThumbnail;
-    lpVPFileInfo->wMajorType = DVPMajorType_Image;
-    lpVPFileInfo->wMinorType = 0;
-    lpVPFileInfo->szImageSize.cx = size.cx;
-    lpVPFileInfo->szImageSize.cy = size.cy;
-    lpVPFileInfo->iNumBits   = bits;
-}
-
-// Sniff a header buffer; returns true when the bytes belong to a format we claim.
-static bool SniffSupported(const uint8_t* d, size_t n)
-{
-    if (n < 12)
-        return false;
-    try
-    {
-        return IsSupportedSniff(jark::sniffFileFormat(std::span<const uint8_t>(d, n)));
-    }
-    catch (...)
-    {
-        return false;
-    }
-}
-
-// Identify a local file: sniff magic bytes, then decode once (result lands in
-// the LRU cache so the following LoadBitmap is free). This gives DOpus the
-// real image size without paying a second decode.
+// Identify a local file: gate by magic bytes, decode once (result lands in the
+// LRU so LoadBitmap / the viewer window reuse it) and report the real size.
+// Animations additionally advertise DVPFIF_CanReturnViewer so DOpus creates
+// our painting window instead of its static image view.
 __declspec(dllexport) BOOL DVP_IdentifyFileW(HWND /*hWnd*/, LPWSTR lpszName,
                                              LPVIEWERPLUGINFILEINFOW lpVPFileInfo,
                                              HANDLE /*hAbortEvent*/)
@@ -309,38 +208,26 @@ __declspec(dllexport) BOOL DVP_IdentifyFileW(HWND /*hWnd*/, LPWSTR lpszName,
 
     uint8_t header[96] = {};
     size_t got = 0;
-    {
-        HANDLE hFile = CreateFileW(lpszName, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-                                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hFile == INVALID_HANDLE_VALUE)
-            return FALSE;
-        DWORD read = 0;
-        ReadFile(hFile, header, sizeof(header), &read, nullptr);
-        CloseHandle(hFile);
-        got = read;
-    }
-
-    if (!SniffSupported(header, got))
+    if (!ReadHeader(lpszName, header, sizeof(header), &got))
+        return FALSE;
+    if (!SniffSupported(header, got, IsApngExt(lpszName)))
         return FALSE;
 
-    auto asset = LoadAsset(lpszName);
+    auto asset = JarkLoadAsset(lpszName);
     if (!asset)
         return FALSE;
 
-    const cv::Mat& m = asset->frames.empty() ? asset->primaryFrame
-                                             : (asset->primaryFrame.empty() ? asset->frames.front()
-                                                                            : asset->primaryFrame);
+    const cv::Mat& m = CurrentFrameOf(*asset);
     if (m.empty())
         return FALSE;
 
-    FillFileInfo(lpVPFileInfo, SIZE{ m.cols, m.rows }, 32);
+    FillFileInfo(lpVPFileInfo, SIZE{ m.cols, m.rows }, IsAnimatedAsset(*asset), m.channels() == 4);
     return TRUE;
 }
 
-// Stream identify (files inside archives/FTP): sniff only, no size probe —
-// full decode happens in LoadBitmapStreamW.
+// Stream identify (archive / FTP members): sniff only, size unknown until load.
 __declspec(dllexport) BOOL DVP_IdentifyFileStreamW(HWND /*hWnd*/, LPSTREAM lpStream,
-                                                   LPWSTR /*lpszName*/,
+                                                   LPWSTR lpszName,
                                                    LPVIEWERPLUGINFILEINFOW lpVPFileInfo,
                                                    DWORD /*dwStreamFlags*/)
 {
@@ -351,23 +238,24 @@ __declspec(dllexport) BOOL DVP_IdentifyFileStreamW(HWND /*hWnd*/, LPSTREAM lpStr
     ULARGE_INTEGER cur = {};
     if (FAILED(lpStream->Seek(zero, STREAM_SEEK_CUR, &cur)))
         return FALSE;
-    LARGE_INTEGER restorePos = {};
-    restorePos.QuadPart = static_cast<LONGLONG>(cur.QuadPart);
+    LARGE_INTEGER restore = {};
+    restore.QuadPart = static_cast<LONGLONG>(cur.QuadPart);
 
     uint8_t header[96] = {};
     ULONG read = 0;
     HRESULT hr = lpStream->Read(header, sizeof(header), &read);
-    lpStream->Seek(restorePos, STREAM_SEEK_SET, nullptr);
-    if (FAILED(hr) || !SniffSupported(header, read))
+    lpStream->Seek(restore, STREAM_SEEK_SET, nullptr);
+    if (FAILED(hr) || !SniffSupported(header, read, IsApngExt(lpszName)))
         return FALSE;
 
-    // Size unknown without a decode; report the header box can't give cheaply.
-    // DOpus will get the real size from the returned bitmap.
-    FillFileInfo(lpVPFileInfo, SIZE{ 0, 0 }, 32);
+    // We cannot know the frame count without a full decode, and streaming a
+    // whole animation just to identify it is wasteful. Advertise the viewer so
+    // animation works for archives too; stills simply paint one frame.
+    FillFileInfo(lpVPFileInfo, SIZE{ 0, 0 }, true, false);
     return TRUE;
 }
 
-// First frame -> HBITMAP. Decode is served from the LRU cache filled at identify.
+// Static path: first frame as a 32bpp DIB (DOpus scales/pans it).
 __declspec(dllexport) HBITMAP DVP_LoadBitmapW(HWND /*hWnd*/, LPWSTR lpszName,
                                               LPVIEWERPLUGINFILEINFOW lpVPFileInfo,
                                               LPSIZE lpszSize, HANDLE /*hAbortEvent*/)
@@ -375,18 +263,23 @@ __declspec(dllexport) HBITMAP DVP_LoadBitmapW(HWND /*hWnd*/, LPWSTR lpszName,
     if (g_refCount == 0 || !lpszName)
         return nullptr;
 
-    auto asset = LoadAsset(lpszName);
+    auto asset = JarkLoadAsset(lpszName);
     if (!asset)
         return nullptr;
 
-    const cv::Mat& m = asset->frames.empty() ? asset->primaryFrame
-                                             : (asset->primaryFrame.empty() ? asset->frames.front()
-                                                                            : asset->primaryFrame);
-    return MatToDIB(m, lpszSize, lpVPFileInfo);
+    SIZE sz = { 0, 0 };
+    bool alpha = false;
+    HBITMAP hbmp = MatToDIB(CurrentFrameOf(*asset), 0, false, 4096, &sz, &alpha);
+    if (!hbmp)
+        return nullptr;
+
+    if (lpVPFileInfo && alpha)
+        lpVPFileInfo->dwFlags |= DVPFIF_HasAlphaChannel;
+    if (lpszSize)
+        *lpszSize = sz;
+    return hbmp;
 }
 
-// Stream load: materialize the stream into a temp file (JarkViewer's loader is
-// path-based), decode, then remove the temp file.
 __declspec(dllexport) HBITMAP DVP_LoadBitmapStreamW(HWND /*hWnd*/, LPSTREAM lpStream,
                                                     LPWSTR lpszName,
                                                     LPVIEWERPLUGINFILEINFOW lpVPFileInfo,
@@ -395,78 +288,30 @@ __declspec(dllexport) HBITMAP DVP_LoadBitmapStreamW(HWND /*hWnd*/, LPSTREAM lpSt
     if (g_refCount == 0 || !lpStream)
         return nullptr;
 
-    // Stream size.
-    LARGE_INTEGER zero = {};
-    ULARGE_INTEGER cur = {}, end = {};
-    if (FAILED(lpStream->Seek(zero, STREAM_SEEK_CUR, &cur)) ||
-        FAILED(lpStream->Seek(zero, STREAM_SEEK_END, &end)))
-        return nullptr;
-    const unsigned long long total = end.QuadPart;
-    LARGE_INTEGER back = {};
-    back.QuadPart = 0;
-    if (FAILED(lpStream->Seek(back, STREAM_SEEK_SET, nullptr)))
+    auto asset = JarkLoadAssetFromStream(lpStream, lpszName);
+    if (!asset)
         return nullptr;
 
-    if (total < 16 || total > 2ull * 1024 * 1024 * 1024)
+    SIZE sz = { 0, 0 };
+    bool alpha = false;
+    HBITMAP hbmp = MatToDIB(CurrentFrameOf(*asset), 0, false, 4096, &sz, &alpha);
+    if (!hbmp)
         return nullptr;
 
-    wchar_t tmpPath[MAX_PATH * 2] = {};
-    wchar_t tmpDir[MAX_PATH] = {};
-    GetTempPathW(MAX_PATH, tmpDir);
-    const wchar_t* baseName = lpszName ? wcsrchr(lpszName, L'\\') : nullptr;
-    baseName = baseName ? baseName + 1 : L"stream.heic";
-    if (!GetTempFileNameW(tmpDir, L"jvo", 0, tmpPath))
-        return nullptr;
-    // GetTempFileName gives ".tmp"; rename to the real extension so the
-    // loader routes by extension where the header is not authoritative.
-    std::wstring realPath = tmpPath;
-    realPath = realPath.substr(0, realPath.size() - 4);
-    realPath += baseName;
-
-    bool ok = false;
-    HBITMAP hbmp = nullptr;
-    HANDLE hFile = CreateFileW(realPath.c_str(), GENERIC_WRITE, 0,
-                               nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
-    if (hFile != INVALID_HANDLE_VALUE)
-    {
-        char buf[65536];
-        unsigned long long remaining = total;
-        ok = true;
-        while (remaining > 0)
-        {
-            ULONG want = static_cast<ULONG>(std::min<unsigned long long>(remaining, sizeof(buf)));
-            ULONG got = 0;
-            if (FAILED(lpStream->Read(buf, want, &got)) || got == 0)
-            {
-                ok = false;
-                break;
-            }
-            DWORD written = 0;
-            if (!WriteFile(hFile, buf, got, &written, nullptr) || written != got)
-            {
-                ok = false;
-                break;
-            }
-            remaining -= got;
-        }
-        CloseHandle(hFile);
-
-        if (ok)
-        {
-            auto asset = LoadAsset(realPath);
-            if (asset)
-            {
-                const cv::Mat& m = asset->frames.empty() ? asset->primaryFrame
-                                                         : (asset->primaryFrame.empty() ? asset->frames.front()
-                                                                                        : asset->primaryFrame);
-                hbmp = MatToDIB(m, lpszSize, lpVPFileInfo);
-            }
-        }
-    }
-
-    DeleteFileW(tmpPath);
-    DeleteFileW(realPath.c_str());
+    if (lpVPFileInfo && alpha)
+        lpVPFileInfo->dwFlags |= DVPFIF_HasAlphaChannel;
+    if (lpszSize)
+        *lpszSize = sz;
     return hbmp;
+}
+
+// Animated path: DOpus creates this window for files where identify set
+// DVPFIF_CanReturnViewer. All frame handling lives in ViewerWindow.cpp.
+__declspec(dllexport) HWND DVP_CreateViewer(HWND hWnd, LPRECT lpRc, DWORD dwFlags)
+{
+    if (g_refCount == 0)
+        return nullptr;
+    return JarkViewerCreate(hWnd, lpRc, dwFlags);
 }
 
 } // extern "C"
