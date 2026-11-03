@@ -118,9 +118,9 @@ struct ScopedCOM
 static bool PixelFormatHasAlpha(REFGUID fmt)
 {
     return fmt == GUID_WICPixelFormat32bppBGRA || fmt == GUID_WICPixelFormat32bppRGBA ||
-           fmt == GUID_WICPixelFormat32bppPRGBA || fmt == GUID_WICPixelFormat32bppPARGB ||
+           fmt == GUID_WICPixelFormat32bppPRGBA || fmt == GUID_WICPixelFormat32bppPBGRA ||
            fmt == GUID_WICPixelFormat64bppRGBA || fmt == GUID_WICPixelFormat64bppBGRA ||
-           fmt == GUID_WICPixelFormat64bppPRGBA || fmt == GUID_WICPixelFormat64bppPARGB ||
+           fmt == GUID_WICPixelFormat64bppPRGBA || fmt == GUID_WICPixelFormat64bppPBGRA ||
            fmt == GUID_WICPixelFormat40bppCMYKAlpha || fmt == GUID_WICPixelFormat80bppCMYKAlpha;
 }
 
@@ -347,7 +347,8 @@ __declspec(dllexport) BOOL DVP_IdentifyFileStreamW(HWND /*hWnd*/, LPSTREAM lpStr
         return FALSE;
 
     // Remember position, read the header, restore position.
-    LARGE_INTEGER cur = {}, zero = {};
+    LARGE_INTEGER zero = {};
+    ULARGE_INTEGER cur = {};
     if (FAILED(lpStream->Seek(zero, STREAM_SEEK_CUR, &cur)))
         return FALSE;
 
