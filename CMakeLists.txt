@@ -33,6 +33,8 @@ add_library(JarkViewOpus SHARED
 
 target_include_directories(JarkViewOpus PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/jark/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/jark/include/libwebp2
+    ${CMAKE_CURRENT_SOURCE_DIR}/jark/include/ffmpeg
     ${CMAKE_CURRENT_SOURCE_DIR}/sdk
 )
 
