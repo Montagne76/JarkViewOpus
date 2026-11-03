@@ -46,7 +46,7 @@ static const wchar_t kPluginCopyright[]   = L"GPL-3.0-or-later";
 static const wchar_t kPluginURL[]         = L"https://github.com/Montagne76/JarkViewOpus";
 
 // Claimed extensions. .gif stays out entirely: Opus's gifanim plugin already
-// handles it. .webp / .jpg are listed but gated in SniffSupported - any file a
+// handles it. .webp / .jpg are listed but gated in Judge() - any file a
 // plugin claims must be decoded by us, so only the variants Opus cannot show
 // correctly (animated WebP, Motion Photo JPEG) are claimed; stills stay on
 // Opus's faster internal path.
@@ -168,10 +168,60 @@ static bool IsExt(const wchar_t* path, const wchar_t* ext)
     return dot && _wcsicmp(dot, ext) == 0;
 }
 
-static bool SniffSupported(const uint8_t* d, size_t n, const wchar_t* path)
+// Gate verdict. NeedMore means "a longer read could still change the answer".
+enum class Verdict { Reject, Accept, NeedMore };
+
+// How much of the file the gate needs. 4 KiB is plenty for every signature
+// here: FormatSniffer resolves BMFF brands from the first 96 bytes, and both
+// APNG's acTL and animated WebP's VP8X flags live within the first few hundred.
+// Only a JPEG can hide its Motion Photo marker deeper, and only that case ever
+// pays for the bigger read.
+static constexpr size_t kProbeBytes    = 4 * 1024;
+static constexpr size_t kJpegHeadBytes = 128 * 1024;
+
+// Walk the JPEG marker stream up to the start of scan. Every segment able to
+// carry a Motion Photo marker (APP1 XMP, APP2 containers) is passed before
+// SOS, so once SOS is reached a bigger read would only see compressed image
+// data and cannot change the verdict.
+static bool JpegReachedScan(const uint8_t* d, size_t n)
+{
+    if (n < 4 || d[0] != 0xFF || d[1] != 0xD8)
+        return true; // not a JPEG after all: nothing more to look for
+
+    size_t i = 2;
+    while (i + 1 < n)
+    {
+        if (d[i] != 0xFF)
+            return true; // desynchronised: give up rather than read on
+        while (i + 1 < n && d[i + 1] == 0xFF)
+            ++i; // fill bytes
+        if (i + 1 >= n)
+            return false;
+
+        const uint8_t marker = d[i + 1];
+        if (marker == 0xDA || marker == 0xD9) // SOS / EOI
+            return true;
+        if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7))
+        {
+            i += 2; // standalone markers carry no length
+            continue;
+        }
+        if (i + 4 > n)
+            return false;
+        const size_t segLen = (static_cast<size_t>(d[i + 2]) << 8) | d[i + 3];
+        if (segLen < 2)
+            return true; // malformed
+        if (i + 2 + segLen > n)
+            return false; // segment body cut off by the window
+        i += 2 + segLen;
+    }
+    return false;
+}
+
+static Verdict Judge(const uint8_t* d, size_t n, const wchar_t* path)
 {
     if (n < 12)
-        return false;
+        return Verdict::NeedMore;
     try
     {
         switch (jark::sniffFileFormat(std::span<const uint8_t>(d, n)))
@@ -179,32 +229,35 @@ static bool SniffSupported(const uint8_t* d, size_t n, const wchar_t* path)
         case jark::FileFormat::Heif:
         case jark::FileFormat::Avif:
         case jark::FileFormat::Jxl:
-            return true;
+            return Verdict::Accept;
         case jark::FileFormat::Png:
             // .apng: trust the extension. .png (or anything else): only when the
             // animation control chunk proves it is an APNG; plain PNGs stay with
             // Opus's faster internal path.
-            return HasExt(path, L".apng") || HasAnimChunk(d, n);
+            return (HasExt(path, L".apng") || HasAnimChunk(d, n)) ? Verdict::Accept
+                                                                 : Verdict::Reject;
         case jark::FileFormat::WebP:
             // Opus decodes static WebP itself and shows frame 1 only for
             // animated ones, so claim the animation exclusively.
-            return IsAnimatedWebp(d, n);
+            return IsAnimatedWebp(d, n) ? Verdict::Accept : Verdict::Reject;
         case jark::FileFormat::Jpeg:
             // A plain JPEG decodes faster inside Opus than through our core, so
             // only claim files that prove they are a Motion Photo.
             if (!IsExt(path, L".jpg") && !IsExt(path, L".jpeg"))
-                return false;
-            return HasMotionMarker(d, n) || HasSidecarVideo(path);
+                return Verdict::Reject;
+            if (HasMotionMarker(d, n) || HasSidecarVideo(path))
+                return Verdict::Accept;
+            return JpegReachedScan(d, n) ? Verdict::Reject : Verdict::NeedMore;
         case jark::FileFormat::Livp:
             // Zip container, but only .livp files are Live Photo packages.
-            return IsExt(path, L".livp");
+            return IsExt(path, L".livp") ? Verdict::Accept : Verdict::Reject;
         default:
-            return false;
+            return Verdict::Reject;
         }
     }
     catch (...)
     {
-        return false;
+        return Verdict::Reject;
     }
 }
 
@@ -243,6 +296,43 @@ static bool ReadHeader(const wchar_t* path, uint8_t* buf, size_t cap, size_t* go
     CloseHandle(hFile);
     *got = read;
     return ok && read > 0;
+}
+
+// Two-tier read. The probe is a stack buffer, so the common path allocates
+// nothing; the 128 KiB window is only opened for a JPEG whose segment walk has
+// not yet reached the image data, i.e. one that could still hold its XMP packet
+// further in.
+static Verdict JudgeFile(const wchar_t* path)
+{
+    uint8_t probe[kProbeBytes];
+    size_t got = 0;
+    if (!ReadHeader(path, probe, sizeof(probe), &got))
+    {
+        JarkLog(L"IdentifyFileW: cannot read header (%s)", path);
+        return Verdict::Reject;
+    }
+
+    Verdict v = Judge(probe, got, path);
+    if (v != Verdict::NeedMore)
+        return v;
+
+    // Short read: the probe already holds the whole file.
+    if (got < sizeof(probe))
+        return Verdict::Reject;
+
+    // Only JPEGs carry anything worth looking at past the probe.
+    if (!IsExt(path, L".jpg") && !IsExt(path, L".jpeg"))
+        return Verdict::Reject;
+    if (JpegReachedScan(probe, got))
+        return Verdict::Reject;
+
+    std::vector<uint8_t> wide(kJpegHeadBytes);
+    size_t wideGot = 0;
+    if (!ReadHeader(path, wide.data(), wide.size(), &wideGot))
+        return Verdict::Reject;
+    v = Judge(wide.data(), wideGot, path);
+    JarkLog(L"IdentifyFileW: wide read %zu bytes -> %d (%s)", wideGot, static_cast<int>(v), path);
+    return v == Verdict::NeedMore ? Verdict::Reject : v;
 }
 
 // ---------------------------------------------------------------------------
@@ -334,16 +424,9 @@ __declspec(dllexport) BOOL DVP_IdentifyFileW(HWND /*hWnd*/, LPWSTR lpszName,
     if (g_refCount == 0 || !lpVPFileInfo || !lpszName)
         return FALSE;
 
-    // 128 KiB: enough for a JPEG's XMP packet, where the Motion Photo markers
-    // live. Header sniffing alone would not see them in the first 96 bytes.
-    std::vector<uint8_t> header(128 * 1024);
-    size_t got = 0;
-    if (!ReadHeader(lpszName, header.data(), header.size(), &got))
-    {
-        JarkLog(L"IdentifyFileW: cannot read header (%s)", lpszName);
-        return FALSE;
-    }
-    if (!SniffSupported(header.data(), got, lpszName))
+    // Cheap format gate first: 4 KiB in, and a JPEG only widens to 128 KiB when
+    // its XMP packet may still be ahead of the probe window.
+    if (JudgeFile(lpszName) != Verdict::Accept)
     {
         JarkLog(L"IdentifyFileW: sniff rejected (%s)", lpszName);
         return FALSE;
@@ -393,7 +476,7 @@ __declspec(dllexport) BOOL DVP_IdentifyFileStreamW(HWND /*hWnd*/, LPSTREAM lpStr
     ULONG read = 0;
     HRESULT hr = lpStream->Read(header, sizeof(header), &read);
     lpStream->Seek(restore, STREAM_SEEK_SET, nullptr);
-    if (FAILED(hr) || !SniffSupported(header, read, lpszName))
+    if (FAILED(hr) || Judge(header, read, lpszName) != Verdict::Accept)
         return FALSE;
 
     // We cannot know the frame count without a full decode, and streaming a
