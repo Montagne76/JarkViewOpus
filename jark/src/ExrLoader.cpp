@@ -70,12 +70,15 @@ namespace {
 
     cv::Mat gammaLut()
     {
-        cv::Mat lut(1, 256, CV_8U);
-        for (int i = 0; i < 256; ++i)
-        {
-            const double v = std::pow(i / 255.0, 1.0 / 2.2) * 255.0;
-            lut.at<uchar>(i) = static_cast<uchar>(std::clamp(v, 0.0, 255.0) + 0.5);
-        }
+        static const cv::Mat lut = [] {
+            cv::Mat table(1, 256, CV_8U);
+            for (int i = 0; i < 256; ++i)
+            {
+                const double v = std::pow(i / 255.0, 1.0 / 2.2) * 255.0;
+                table.at<uchar>(i) = static_cast<uchar>(std::clamp(v, 0.0, 255.0) + 0.5);
+            }
+            return table;
+        }();
         return lut;
     }
 }
@@ -139,15 +142,16 @@ cv::Mat loadEXR(std::wstring_view path, std::span<const uint8_t> buf)
     cv::Mat eightBit;
     floatMat.convertTo(eightBit, CV_8U, 255.0);
 
-    // convertTo saturates, so the LUT can assume 0..255 input.
-    cv::Mat lut = gammaLut();
-    cv::LUT(eightBit, lut, eightBit);
+    // convertTo saturates, so the LUT can assume 0..255 input. src and dst must
+    // not alias here, hence the separate destination.
+    cv::Mat gammaCorrected;
+    cv::LUT(eightBit, gammaLut(), gammaCorrected);
 
     free(rgba);
 
     JARK_LOG("EXR decoded: {}x{} white={:.4f} alpha={} ({})",
              width, height, white, hasAlpha ? 1 : 0, jarkUtils::wstringToUtf8(path));
-    return eightBit;
+    return gammaCorrected;
 }
 
 } // namespace jark
