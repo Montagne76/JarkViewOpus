@@ -41,16 +41,17 @@ static const GUID GUIDPlugin_JarkViewOpus =
 { 0x9a7b3f42, 0x6c1d, 0x4e5a, { 0x8f, 0x2b, 0x3d, 0x9e, 0x1c, 0x7a, 0x5b, 0x60 } };
 
 static const wchar_t kPluginName[]        = L"JarkViewOpus";
-static const wchar_t kPluginDescription[] = L"Modern image formats via JarkViewer core (HEIC/AVIF/JXL/APNG) - JarkViewOpus";
+static const wchar_t kPluginDescription[] = L"Modern image formats via JarkViewer core (HEIC/AVIF/JXL/APNG/WebP/Live Photo) - JarkViewOpus";
 static const wchar_t kPluginCopyright[]   = L"GPL-3.0-or-later";
 static const wchar_t kPluginURL[]         = L"https://github.com/Montagne76/JarkViewOpus";
 
-// Claimed extensions. (.webp/.gif intentionally omitted: Opus 13 handles them.)
-// .jpg/.jpeg are listed so Android/Samsung Motion Photos can be reached, but
-// identify only claims them when a motion-photo marker or a sidecar video is
-// present - plain JPEGs stay on Opus's faster internal path.
+// Claimed extensions. .gif stays out entirely: Opus's gifanim plugin already
+// handles it. .webp / .jpg are listed but gated in SniffSupported - any file a
+// plugin claims must be decoded by us, so only the variants Opus cannot show
+// correctly (animated WebP, Motion Photo JPEG) are claimed; stills stay on
+// Opus's faster internal path.
 static const wchar_t kHandleExts[] =
-    L".heic;.heif;.avif;.avifs;.jxl;.apng;.livp;.jpg;.jpeg";
+    L".heic;.heif;.avif;.avifs;.jxl;.apng;.livp;.webp;.jpg;.jpeg";
 
 static HINSTANCE        g_hModuleInstance = nullptr;
 static CRITICAL_SECTION g_cs;
@@ -86,6 +87,31 @@ static bool HasAnimChunk(const uint8_t* d, size_t n)
             return true;
     }
     return false;
+}
+
+// Animated WebP: RIFF/WEBP container whose first chunk is VP8X and whose
+// extended header sets the animation flag (bit 1). Static WebP files use VP8/
+// VP8L instead and have no VP8X at all.
+static bool IsAnimatedWebp(const uint8_t* d, size_t n)
+{
+    if (n < 30 || memcmp(d, "RIFF", 4) != 0 || memcmp(d + 8, "WEBP", 4) != 0)
+        return false;
+    if (memcmp(d + 12, "VP8X", 4) != 0)
+        return false;
+    if (d[20] & 0x02) // ANIMATION flag in the VP8X header
+        return true;
+
+    // Some muxers leave the flag clear; fall back to the chunk list.
+    bool anim = false;
+    bool frame = false;
+    for (size_t i = 12; i + 4 <= n; ++i)
+    {
+        if (memcmp(d + i, "ANIM", 4) == 0)
+            anim = true;
+        else if (memcmp(d + i, "ANMF", 4) == 0)
+            frame = true;
+    }
+    return anim && frame;
 }
 
 // Same-name sidecar video (Apple / VIVO export the clip next to the photo).
@@ -159,6 +185,10 @@ static bool SniffSupported(const uint8_t* d, size_t n, const wchar_t* path)
             // animation control chunk proves it is an APNG; plain PNGs stay with
             // Opus's faster internal path.
             return HasExt(path, L".apng") || HasAnimChunk(d, n);
+        case jark::FileFormat::WebP:
+            // Opus decodes static WebP itself and shows frame 1 only for
+            // animated ones, so claim the animation exclusively.
+            return IsAnimatedWebp(d, n);
         case jark::FileFormat::Jpeg:
             // A plain JPEG decodes faster inside Opus than through our core, so
             // only claim files that prove they are a Motion Photo.
