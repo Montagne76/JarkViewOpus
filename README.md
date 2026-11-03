@@ -9,7 +9,7 @@ Directory Opus 查看器插件：在 DOpus 预览窗格内直接渲染 HEIC/HEIF
 - [x] 插件框架：`DVP_InitEx / DVP_IdentifyW / DVP_IdentifyFileW / DVP_LoadBitmapW` + `DVP_CreateViewer`
 - [x] 魔数嗅探（BMFF brand / JXL / PNG，逻辑对齐 JarkViewer FormatSniffer）
 - [x] **Phase 1**：接入 JarkViewer 解码核心（libheif / libavif / libjxl / OpenCV 静态库），零 WIC 依赖
-- [x] **Phase 2**：动图循环播放（APNG、动图 AVIF、动图 JXL）——自定义 viewer 窗口 + 定时器推帧
+- [x] **Phase 2**：动图循环播放（APNG、动图 WebP、动图 AVIF、动图 JXL）——自定义 viewer 窗口 + 定时器推帧
 - [x] **Phase 3**：Motion Photo / Live Photo 窗格内播放（上游 MediaPlayer，复用已链接的 FFmpeg）
 - [ ] Phase 4：配置界面、打包、发布
 
@@ -20,6 +20,10 @@ Directory Opus 查看器插件：在 DOpus 预览窗格内直接渲染 HEIC/HEIF
 | 静态 HEIC / AVIF / JXL | `DVP_LoadBitmapW` 返回 HBITMAP | 由 DOpus 内置查看器负责 |
 | 动图（帧数 > 1） | `DVPFIF_CanReturnViewer` → `DVP_CreateViewer` 自绘窗口 + `SetTimer` 循环 | 插件自绘（适应窗口 / 缩放 / 90° 旋转） |
 | 实况照片（静图 + 视频） | 同上，但帧由 `jark::MediaPlayer` 实时解码 | 同上；视频帧等比内嵌在照片版面内 |
+
+### 动图 WebP 的认领条件
+
+不用扩展名判断，只看容器：`RIFF....WEBP` 的第一块是 `VP8X` 且扩展头里的 **animation 位（bit 1）**置位，或者同时出现 `ANIM` / `ANMF` 块。静态 WebP（含以 `VP8X` 开头的无损/带 alpha 变体，其 flag 只有 ALPHA/ICC 位）一律返回 FALSE，继续走 Opus 内置解码——那边更快，而且静态图本来就不需要自绘窗口。
 
 ### 实况照片支持的三种封装
 
@@ -36,7 +40,7 @@ Directory Opus 查看器插件：在 DOpus 预览窗格内直接渲染 HEIC/HEIF
 1. 从 Actions 构建产物下载 `JarkViewOpus.dll`
 2. 复制到 `...\Directory Opus\Viewers\`
 3. 重启 DOpus，`Preferences / Plugins / Viewers` 中可见 **JarkViewOpus**
-4. 预览 `.heic` / `.avif` / `.jxl` / `.apng` / `.livp`（`.png` 只要含 APNG 的 `acTL` 块也会被接管）
+4. 预览 `.heic` / `.avif` / `.jxl` / `.apng` / `.livp` / 动图 `.webp`（`.png` 只要含 APNG 的 `acTL` 块也会被接管）
 5. 实况照片：`.heic` + 同名 `.mov`、安卓 Motion Photo `.jpg`、或 `.livp` 都会在窗格里自动播放一次
 
 ## 坑：插件列表置顶并不够
