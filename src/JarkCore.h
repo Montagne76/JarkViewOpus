@@ -10,7 +10,7 @@
 #include <memory>
 #include <string>
 
-#include "../jark/include/jarkUtils.h"
+#include "../jark/include/ImageDatabase.h"  // also brings in jarkUtils.h (ImageAsset)
 
 // Process-wide decode database. Starts the upstream preload worker thread;
 // without it the cache API would poll forever (see JarkCore.cpp).

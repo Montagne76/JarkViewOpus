@@ -191,7 +191,7 @@ __declspec(dllexport) BOOL DVP_IdentifyW(LPVIEWERPLUGININFOW lpVPInfo)
 
     lpVPInfo->dwlMinFileSize    = 16;
     lpVPInfo->uiMajorFileType   = DVPMajorType_Image;
-    lpVPInfo->idPlugin          = GUID_JarkViewOpus;
+    lpVPInfo->idPlugin          = GUIDPlugin_JarkViewOpus;
     return TRUE;
 }
 
