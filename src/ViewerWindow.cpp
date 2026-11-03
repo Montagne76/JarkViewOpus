@@ -26,6 +26,7 @@
 #include "JarkCore.h"
 #include "../jark/include/jarkUtils.h"
 #include "../jark/include/MediaPlayer.h"
+#include "../jark/include/VectorImage.h"
 #include "../sdk/DirectoryOpusViewerPlugins.h"
 
 namespace
@@ -428,8 +429,21 @@ namespace
         st->live = IsLivePhotoAsset(*st->asset);
         st->durations.assign(st->asset->frameDurations.begin(), st->asset->frameDurations.end());
 
-        const cv::Mat& first = CurrentFrameOf(*st->asset);
-        st->baseSize = SIZE{ first.cols, first.rows };
+        // An SVG carries a vector source; its first raster is only the initial
+        // preview (long edge <= 1024), while the size that matters for 1:1 and
+        // fit is the box the document declares.
+        if (st->asset->vectorSource &&
+            st->asset->vectorSource->intrinsicWidth > 0 &&
+            st->asset->vectorSource->intrinsicHeight > 0)
+        {
+            st->baseSize = SIZE{ st->asset->vectorSource->intrinsicWidth,
+                                 st->asset->vectorSource->intrinsicHeight };
+        }
+        else
+        {
+            const cv::Mat& first = CurrentFrameOf(*st->asset);
+            st->baseSize = SIZE{ first.cols, first.rows };
+        }
         st->size = LayoutSize(st);
 
         const bool dib = EnsureBmp(st);
@@ -556,6 +570,21 @@ namespace
         FillRect(target, &client, bg);
         if (localBg)
             DeleteObject(localBg);
+
+        // Vector sources are re-rasterised at the resolution the window actually
+        // shows. The first raster is a 1024px preview, so without this an SVG
+        // would go soft as soon as the user zoomed past that.
+        if (st && st->asset && st->asset->vectorSource && cw > 0 && ch > 0)
+        {
+            const double scale = ScaleOf(st, cw, ch);
+            const int percent = static_cast<int>(scale * 100.0 + 0.5);
+            const int target = jark::vectorTargetEdge(*st->asset, percent > 0 ? percent : 1, 100);
+            if (target > 0 && jark::refreshVectorRaster(*st->asset, target))
+            {
+                ++st->frameGen;
+                JarkLog(L"Paint: vector re-raster to %d px (%d%%)", target, percent);
+            }
+        }
 
         bool drew = false;
         if (st && EnsureBmp(st) && st->size.cx > 0 && st->size.cy > 0 && cw > 0 && ch > 0)

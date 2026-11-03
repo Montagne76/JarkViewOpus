@@ -11,6 +11,7 @@
 #endif
 
 #include "blpDecoder.h"
+#include "ExrLoader.h"
 #include "MappedFileReader.h"
 #include "MediaDecoder.h"
 #include "MediaPlayer.h"
@@ -3428,11 +3429,22 @@ ImageAsset ImageDatabase::decodeByFormat(jark::FileFormat format, const wstring&
     case jark::FileFormat::Audio:
         return {};
 
+    case jark::FileFormat::Exr: {
+        // 这份静态库的 OpenCV 编译时没链接 OpenEXR（运行时提示 codec disabled），
+        // WIC 也没有 EXR 解码器，兜底路径必败——改走 tinyexr。
+        auto img = jark::loadEXR(path, buf);
+        if (img.empty())
+            return {};
+
+        ImageAsset imageAsset{ ImageFormat::Still, std::move(img) };
+        applyExifInfo(imageAsset, path, buf, ExifPolicy::SimpleOnly);
+        return imageAsset;
+    }
+
     // 以下格式交给通用兜底（OpenCV → WIC）
     case jark::FileFormat::Bmp:
     case jark::FileFormat::Jxr:
     case jark::FileFormat::Jp2:
-    case jark::FileFormat::Exr:
     case jark::FileFormat::Pnm:
     case jark::FileFormat::Ras:
     case jark::FileFormat::Unknown:

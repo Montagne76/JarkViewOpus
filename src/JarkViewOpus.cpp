@@ -41,7 +41,7 @@ static const GUID GUIDPlugin_JarkViewOpus =
 { 0x9a7b3f42, 0x6c1d, 0x4e5a, { 0x8f, 0x2b, 0x3d, 0x9e, 0x1c, 0x7a, 0x5b, 0x60 } };
 
 static const wchar_t kPluginName[]        = L"JarkViewOpus";
-static const wchar_t kPluginDescription[] = L"Modern image formats via JarkViewer core (HEIC/AVIF/JXL/APNG/WebP/Live Photo) - JarkViewOpus";
+static const wchar_t kPluginDescription[] = L"Modern image formats via JarkViewer core (HEIC/AVIF/JXL/APNG/WebP/PSD/EXR/HDR/SVG/Live Photo) - JarkViewOpus";
 static const wchar_t kPluginCopyright[]   = L"GPL-3.0-or-later";
 static const wchar_t kPluginURL[]         = L"https://github.com/Montagne76/JarkViewOpus";
 
@@ -51,8 +51,13 @@ static const wchar_t kPluginURL[]         = L"https://github.com/Montagne76/Jark
 // correctly (animated WebP, Motion Photo JPEG) are claimed; stills stay on
 // Opus's faster internal path. .psd/.psb are claimed because Opus only paints
 // the preview thumbnail baked into the file.
+//
+// The trailing group are formats Opus has no plugin and no built-in support
+// for (see README, "how to prove a format is missing"). .dds / .jp2 / .tga /
+// .pcx are deliberately absent: Opus already covers those.
 static const wchar_t kHandleExts[] =
-    L".heic;.heif;.avif;.avifs;.jxl;.apng;.livp;.webp;.jpg;.jpeg;.psd;.psb";
+    L".heic;.heif;.avif;.avifs;.jxl;.apng;.livp;.webp;.jpg;.jpeg;.psd;.psb"
+    L";.exr;.hdr;.pic;.qoi;.pnm;.ppm;.pgm;.pbm;.pxm;.pfm;.blp;.svg";
 
 static HINSTANCE        g_hModuleInstance = nullptr;
 static CRITICAL_SECTION g_cs;
@@ -284,6 +289,33 @@ static Verdict Judge(const uint8_t* d, size_t n, const wchar_t* path)
             }
             return Verdict::Accept;
         }
+
+        // Formats Opus has neither a viewer plugin nor built-in support for.
+        // Each one also requires the extension: Opus's Docs plugin declares *.*
+        // for its preview handlers, and several of these signatures are very
+        // short (PFM is three bytes, PNM is two), so the sniff alone is not
+        // enough to tell an image from a text file.
+        case jark::FileFormat::Exr:
+            return IsExt(path, L".exr") ? Verdict::Accept : Verdict::Reject;
+        case jark::FileFormat::Hdr:
+            return IsExt(path, L".hdr") ? Verdict::Accept : Verdict::Reject;
+        case jark::FileFormat::Pic:
+            return IsExt(path, L".pic") ? Verdict::Accept : Verdict::Reject;
+        case jark::FileFormat::Qoi:
+            return IsExt(path, L".qoi") ? Verdict::Accept : Verdict::Reject;
+        case jark::FileFormat::Pnm:
+            return (IsExt(path, L".pnm") || IsExt(path, L".ppm") || IsExt(path, L".pgm") ||
+                    IsExt(path, L".pbm") || IsExt(path, L".pxm")) ? Verdict::Accept
+                                                                 : Verdict::Reject;
+        case jark::FileFormat::Pfm:
+            return IsExt(path, L".pfm") ? Verdict::Accept : Verdict::Reject;
+        case jark::FileFormat::Blp:
+            return IsExt(path, L".blp") ? Verdict::Accept : Verdict::Reject;
+        case jark::FileFormat::Svg:
+            // Rendered by lunasvg and re-rasterised on zoom, so it also scales
+            // past the point where Opus's Edge preview would show a scrolling
+            // web page instead of the drawing.
+            return IsExt(path, L".svg") ? Verdict::Accept : Verdict::Reject;
         default:
             return Verdict::Reject;
         }

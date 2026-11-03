@@ -19,6 +19,7 @@ set(JARK_SRC
     jark/src/AudioOutput.cpp
     jark/src/AudioSpectrumAnalyzer.cpp
     jark/src/PsdDecoder.cpp
+    jark/src/ExrLoader.cpp
     jark/src/VectorImage.cpp
     jark/src/blpDecoder.cpp
     jark/src/AiPrompt.cpp

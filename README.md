@@ -41,12 +41,41 @@ Opus 内置对 PSD 只能画出文件里**嵌入的预览缩略图**（Photoshop
 
 保护性上限：画布超过 **1 亿像素** 的不认领——合成图会是数百 MB 的 BGRA 缓冲，加上 OpenCV 的拷贝，全部发生在 Opus 进程里。
 
+### 新接的非主流格式（Opus 侧完全无支持）
+
+这几类格式 Opus 既没有查看器插件、也没有内置解码（判定方法见文末「要不要再接一种格式：怎么查」）。认领一律要求**扩展名 + 魔数双重命中**，因为其中几个签名极短（PFM 三个字节、PNM 两个字节），只靠嗅探会把普通文本文件吃进来。
+
+| 扩展名 | 格式 | 解码路径 | 说明 |
+|---|---|---|---|
+| `.exr` | OpenEXR | **tinyexr**（本项目新增） | 这份 OpenCV 编译时没链接 OpenEXR（运行时只会答 "OpenEXR codec is disabled"），WIC 也没有 EXR 解码器，所以自带一个。覆盖 tinyexr 支持的 NONE/RLE/ZIP/ZIPS/PIZ/PXR24 等压缩。线性场景参考值先按 99.5% 亮度定白点（避开太阳/高光把整幅拉黑），再走 sRGB 编码，否则 HDR 内容不是全白就是全黑 |
+| `.hdr` | Radiance RGBE | stb_image | 上游 `loadSTB`，stb 内部做 gamma 展开 |
+| `.pic` | Softimage PIC | stb_image | 同上 |
+| `.qoi` | Quite OK Image | 上游 `loadQOI` | — |
+| `.pnm .ppm .pgm .pbm .pxm` | Netpbm | OpenCV `PxMDecoder` | 16 位样本线性缩放到 8 位 |
+| `.pfm` | Portable FloatMap | 上游 `loadPFM` | 浮点，`convertMatToCV_8U` 动态定标 |
+| `.blp` | Blizzard BLP1/BLP2 | 上游 `loadBLP` | 调色板 / DXT1·3·5 / RawBGRA |
+| `.svg` | SVG | lunasvg + 上游 `VectorImage` | 真矢量：按当前缩放**重新光栅化**（首帧 1024px，上限 4096px），不是固定分辨率位图。Opus 自己用 Edge 预览（相当于开个网页），所以接过来 |
+
+`.svg` 另有两个细节：`baseSize` 取文档声明的 intrinsic 尺寸而非首帧光栅尺寸，所以 1:1 与适应窗口都按矢量边界算；`<switch>`、CSS `var()`、`light-dark()` 由上游 `SVGPreprocessor` 折叠（lunasvg 不认这些，遇到会把整个图元丢掉不画）。
+
+故意**不接**：`.dds`（Opus 13 原生 + opuswic）、`.jp2/.j2k`（自带 `j2k.dll`）、`.tga`（`targa.dll`）、`.pcx`（`pcx.dll`）、`.ras/.sr`（上游没有解码器、OpenCV 也不支持，接了必然白屏）、`.wp2`（实验格式，只能按扩展名判定，收益接近零）。
+
+### 我们改过上游哪几处（vendor patch）
+
+除 `src/` 下自己的代码，`jark/` 里有三处改动，升级上游时需要重新打：
+
+| 文件 | 改动 |
+|---|---|
+| `src/ImageDatabase.cpp` | `case FileFormat::Exr` 从「交给 OpenCV 兜底」改成调 `jark::loadEXR` |
+| `src/ImageDatabase.cpp` | 顶部加 `#include "ExrLoader.h"` |
+| `include/tinyexr.h` | `TINYEXR_USE_STB_ZLIB` 段的两行函数声明去掉 `extern "C"`（stb 的实现是 C++ 链接，否则链接期找不到符号） |
+
 ## 安装（测试）
 
 1. 从 Actions 构建产物下载 `JarkViewOpus.dll`
 2. 复制到 `...\Directory Opus\Viewers\`
 3. 重启 DOpus，`Preferences / Plugins / Viewers` 中可见 **JarkViewOpus**
-4. 预览 `.heic` / `.avif` / `.jxl` / `.apng` / `.livp` / 动图 `.webp` / `.psd` / `.psb`（`.png` 只要含 APNG 的 `acTL` 块也会被接管）
+4. 预览 `.heic` / `.avif` / `.jxl` / `.apng` / `.livp` / 动图 `.webp` / `.psd` / `.psb` / `.exr` / `.hdr` / `.qoi` / `.pnm` `.ppm` `.pgm` / `.pfm` / `.blp` / `.svg`（`.png` 只要含 APNG 的 `acTL` 块也会被接管）
 5. 实况照片：`.heic` + 同名 `.mov`、安卓 Motion Photo `.jpg`、或 `.livp` 都会在窗格里自动播放一次
 
 ## 坑：插件列表置顶并不够
