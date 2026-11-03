@@ -1,0 +1,426 @@
+﻿2026-11-03T05:20:55.1213876Z Current runner version: '2.338.2'
+2026-11-03T05:20:55.1239818Z ##[group]Runner Image Provisioner
+2026-11-03T05:20:55.1240643Z Hosted Compute Agent
+2026-11-03T05:20:55.1241206Z Version: 20261021.618
+2026-11-03T05:20:55.1241810Z Commit: 21505ad2541d5be6135ed84fc33697146cf75b8e
+2026-11-03T05:20:55.1242523Z Build Date: 2026-10-21T00:45:21Z
+2026-11-03T05:20:55.1243144Z Worker ID: {3532aa32-54c8-4beb-be89-1f700f9a2c52}
+2026-11-03T05:20:55.1243793Z Region: westus
+2026-11-03T05:20:55.1244315Z Cloud: Azure
+2026-11-03T05:20:55.1244797Z ##[endgroup]
+2026-11-03T05:20:55.1246131Z ##[group]Operating System
+2026-11-03T05:20:55.1246761Z Microsoft Windows Server 2025
+2026-11-03T05:20:55.1247310Z 10.0.26100
+2026-11-03T05:20:55.1247824Z Datacenter
+2026-11-03T05:20:55.1248322Z ##[endgroup]
+2026-11-03T05:20:55.1248840Z ##[group]Runner Image
+2026-11-03T05:20:55.1249395Z Image: windows-2025-vs2026
+2026-11-03T05:20:55.1249947Z Version: 20261030.294.1
+2026-11-03T05:20:55.1251832Z Included Software: https://github.com/actions/runner-images/blob/win25-vs2026/20261030.294/images/windows/Windows2025-VS2026-Readme.md
+2026-11-03T05:20:55.1253429Z Image Release: https://github.com/actions/runner-images/releases/tag/win25-vs2026%2F20261030.294
+2026-11-03T05:20:55.1254355Z ##[endgroup]
+2026-11-03T05:20:55.1255824Z ##[group]GITHUB_TOKEN Permissions
+2026-11-03T05:20:55.1257802Z Contents: read
+2026-11-03T05:20:55.1258359Z Metadata: read
+2026-11-03T05:20:55.1258927Z Packages: read
+2026-11-03T05:20:55.1259420Z ##[endgroup]
+2026-11-03T05:20:55.1261465Z Secret source: Actions
+2026-11-03T05:20:55.1262360Z Cache mode: write
+2026-11-03T05:20:55.1263023Z Prepare workflow directory
+2026-11-03T05:20:55.1633738Z Prepare all required actions
+2026-11-03T05:20:55.1682699Z Getting action download info
+2026-11-03T05:20:55.5160006Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+2026-11-03T05:20:55.6513813Z Download action repository 'actions/cache@v4' (SHA:0057852bfaa89a56745cba8c7296529d2fc39830)
+2026-11-03T05:20:55.8015722Z Download action repository 'actions/upload-artifact@v4' (SHA:ea165f8d65b6e75b540449e92b4886f43607fa02)
+2026-11-03T05:20:56.1542187Z Complete job name: build
+2026-11-03T05:20:56.3357413Z ##[group]Run actions/checkout@v4
+2026-11-03T05:20:56.3358625Z with:
+2026-11-03T05:20:56.3359194Z   repository: Montagne76/JarkViewOpus
+2026-11-03T05:20:56.3364849Z   token: ***
+2026-11-03T05:20:56.3365379Z   ssh-strict: true
+2026-11-03T05:20:56.3365919Z   ssh-user: git
+2026-11-03T05:20:56.3366482Z   persist-credentials: true
+2026-11-03T05:20:56.3367094Z   clean: true
+2026-11-03T05:20:56.3367654Z   sparse-checkout-cone-mode: true
+2026-11-03T05:20:56.3368314Z   fetch-depth: 1
+2026-11-03T05:20:56.3369107Z   fetch-tags: false
+2026-11-03T05:20:56.3369892Z   show-progress: true
+2026-11-03T05:20:56.3370445Z   lfs: false
+2026-11-03T05:20:56.3370972Z   submodules: false
+2026-11-03T05:20:56.3371528Z   set-safe-directory: true
+2026-11-03T05:20:56.3372026Z   allow-unsafe-pr-checkout: false
+2026-11-03T05:20:56.3372884Z ##[endgroup]
+2026-11-03T05:20:56.4886844Z Syncing repository: Montagne76/JarkViewOpus
+2026-11-03T05:20:56.4888996Z ##[group]Getting Git version info
+2026-11-03T05:20:56.4889860Z Working directory is 'D:\a\JarkViewOpus\JarkViewOpus'
+2026-11-03T05:20:56.5897553Z [command]"C:\Program Files\Git\bin\git.exe" version
+2026-11-03T05:20:57.0012218Z git version 2.56.0.windows.4
+2026-11-03T05:20:57.0058888Z ##[endgroup]
+2026-11-03T05:20:57.0083697Z Temporarily overriding HOME='D:\a\_temp\78e5d3df-e457-4711-ae3e-08bf9e1afa6d' before making global git config changes
+2026-11-03T05:20:57.0085576Z Adding repository directory to the temporary git global config as a safe directory
+2026-11-03T05:20:57.0094835Z [command]"C:\Program Files\Git\bin\git.exe" config --global --add safe.directory D:\a\JarkViewOpus\JarkViewOpus
+2026-11-03T05:20:57.0752907Z Deleting the contents of 'D:\a\JarkViewOpus\JarkViewOpus'
+2026-11-03T05:20:57.0759025Z ##[group]Initializing the repository
+2026-11-03T05:20:57.0767994Z [command]"C:\Program Files\Git\bin\git.exe" init D:\a\JarkViewOpus\JarkViewOpus
+2026-11-03T05:20:57.1779499Z Initialized empty Git repository in D:/a/JarkViewOpus/JarkViewOpus/.git/
+2026-11-03T05:20:57.1826405Z [command]"C:\Program Files\Git\bin\git.exe" remote add origin https://github.com/Montagne76/JarkViewOpus
+2026-11-03T05:20:57.2665256Z ##[endgroup]
+2026-11-03T05:20:57.2667015Z ##[group]Disabling automatic garbage collection
+2026-11-03T05:20:57.2674674Z [command]"C:\Program Files\Git\bin\git.exe" config --local gc.auto 0
+2026-11-03T05:20:57.3062636Z ##[endgroup]
+2026-11-03T05:20:57.3064468Z ##[group]Setting up auth
+2026-11-03T05:20:57.3074517Z [command]"C:\Program Files\Git\bin\git.exe" config --local --name-only --get-regexp core\.sshCommand
+2026-11-03T05:20:57.3480295Z [command]"C:\Program Files\Git\bin\git.exe" submodule foreach --recursive "sh -c \"git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :\""
+2026-11-03T05:20:58.9557946Z [command]"C:\Program Files\Git\bin\git.exe" config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-11-03T05:20:58.9948644Z [command]"C:\Program Files\Git\bin\git.exe" submodule foreach --recursive "sh -c \"git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :\""
+2026-11-03T05:20:59.5776997Z [command]"C:\Program Files\Git\bin\git.exe" config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-11-03T05:20:59.6179287Z [command]"C:\Program Files\Git\bin\git.exe" submodule foreach --recursive "git config --local --show-origin --name-only --get-regexp remote.origin.url"
+2026-11-03T05:21:00.1840467Z [command]"C:\Program Files\Git\bin\git.exe" config --local http.https://github.com/.extraheader "AUTHORIZATION: basic ***"
+2026-11-03T05:21:00.2242207Z ##[endgroup]
+2026-11-03T05:21:00.2243098Z ##[group]Fetching the repository
+2026-11-03T05:21:00.2258810Z [command]"C:\Program Files\Git\bin\git.exe" -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +73ccc33dc500f7b9250b243015cc991f585050a4:refs/remotes/origin/main
+2026-11-03T05:21:09.5162125Z From https://github.com/Montagne76/JarkViewOpus
+2026-11-03T05:21:09.5165582Z  * [new ref]         73ccc33dc500f7b9250b243015cc991f585050a4 -> origin/main
+2026-11-03T05:21:09.5203955Z ##[endgroup]
+2026-11-03T05:21:09.5204628Z ##[group]Determining the checkout info
+2026-11-03T05:21:09.5208197Z ##[endgroup]
+2026-11-03T05:21:09.5218780Z [command]"C:\Program Files\Git\bin\git.exe" sparse-checkout disable
+2026-11-03T05:21:09.5846956Z [command]"C:\Program Files\Git\bin\git.exe" config --local --unset-all extensions.worktreeConfig
+2026-11-03T05:21:09.6238801Z ##[group]Checking out the ref
+2026-11-03T05:21:09.6247876Z [command]"C:\Program Files\Git\bin\git.exe" checkout --progress --force -B main refs/remotes/origin/main
+2026-11-03T05:21:11.1362327Z Updating files:   0% (10/1053)
+2026-11-03T05:21:11.1402928Z Updating files:   1% (11/1053)
+2026-11-03T05:21:11.1429934Z Updating files:   2% (22/1053)
+2026-11-03T05:21:11.1458486Z Updating files:   3% (32/1053)
+2026-11-03T05:21:11.1487680Z Updating files:   4% (43/1053)
+2026-11-03T05:21:11.1532877Z Updating files:   5% (53/1053)
+2026-11-03T05:21:11.1561944Z Updating files:   6% (64/1053)
+2026-11-03T05:21:11.1592296Z Updating files:   7% (74/1053)
+2026-11-03T05:21:11.1616017Z Updating files:   8% (85/1053)
+2026-11-03T05:21:11.1640388Z Updating files:   9% (95/1053)
+2026-11-03T05:21:11.1670749Z Updating files:  10% (106/1053)
+2026-11-03T05:21:11.1711254Z Updating files:  11% (116/1053)
+2026-11-03T05:21:11.1736846Z Updating files:  12% (127/1053)
+2026-11-03T05:21:11.1766190Z Updating files:  13% (137/1053)
+2026-11-03T05:21:11.1799805Z Updating files:  14% (148/1053)
+2026-11-03T05:21:11.1827870Z Updating files:  15% (158/1053)
+2026-11-03T05:21:11.1854484Z Updating files:  16% (169/1053)
+2026-11-03T05:21:11.1878751Z Updating files:  17% (180/1053)
+2026-11-03T05:21:11.1913283Z Updating files:  18% (190/1053)
+2026-11-03T05:21:11.1941251Z Updating files:  19% (201/1053)
+2026-11-03T05:21:11.1969930Z Updating files:  20% (211/1053)
+2026-11-03T05:21:11.2000414Z Updating files:  21% (222/1053)
+2026-11-03T05:21:11.2026416Z Updating files:  22% (232/1053)
+2026-11-03T05:21:11.2052710Z Updating files:  23% (243/1053)
+2026-11-03T05:21:11.2086587Z Updating files:  24% (253/1053)
+2026-11-03T05:21:11.2120261Z Updating files:  25% (264/1053)
+2026-11-03T05:21:11.2145035Z Updating files:  26% (274/1053)
+2026-11-03T05:21:11.2179311Z Updating files:  27% (285/1053)
+2026-11-03T05:21:11.2212324Z Updating files:  28% (295/1053)
+2026-11-03T05:21:11.2239991Z Updating files:  29% (306/1053)
+2026-11-03T05:21:11.2277273Z Updating files:  30% (316/1053)
+2026-11-03T05:21:11.2303488Z Updating files:  31% (327/1053)
+2026-11-03T05:21:11.2343880Z Updating files:  32% (337/1053)
+2026-11-03T05:21:11.2378427Z Updating files:  33% (348/1053)
+2026-11-03T05:21:11.2406330Z Updating files:  34% (359/1053)
+2026-11-03T05:21:11.2441339Z Updating files:  35% (369/1053)
+2026-11-03T05:21:11.2469708Z Updating files:  36% (380/1053)
+2026-11-03T05:21:11.2502765Z Updating files:  37% (390/1053)
+2026-11-03T05:21:11.2531077Z Updating files:  38% (401/1053)
+2026-11-03T05:21:11.2560478Z Updating files:  39% (411/1053)
+2026-11-03T05:21:11.2590541Z Updating files:  40% (422/1053)
+2026-11-03T05:21:11.2637039Z Updating files:  41% (432/1053)
+2026-11-03T05:21:11.2672546Z Updating files:  42% (443/1053)
+2026-11-03T05:21:11.2704538Z Updating files:  43% (453/1053)
+2026-11-03T05:21:11.2749686Z Updating files:  44% (464/1053)
+2026-11-03T05:21:11.2796140Z Updating files:  45% (474/1053)
+2026-11-03T05:21:11.2848806Z Updating files:  46% (485/1053)
+2026-11-03T05:21:11.2881429Z Updating files:  47% (495/1053)
+2026-11-03T05:21:11.2908488Z Updating files:  48% (506/1053)
+2026-11-03T05:21:11.2940161Z Updating files:  49% (516/1053)
+2026-11-03T05:21:11.2973425Z Updating files:  50% (527/1053)
+2026-11-03T05:21:11.3042001Z Updating files:  51% (538/1053)
+2026-11-03T05:21:11.3110873Z Updating files:  52% (548/1053)
+2026-11-03T05:21:11.3146203Z Updating files:  53% (559/1053)
+2026-11-03T05:21:11.3177244Z Updating files:  54% (569/1053)
+2026-11-03T05:21:11.3219421Z Updating files:  55% (580/1053)
+2026-11-03T05:21:11.3257217Z Updating files:  56% (590/1053)
+2026-11-03T05:21:11.3283813Z Updating files:  57% (601/1053)
+2026-11-03T05:21:11.3320524Z Updating files:  58% (611/1053)
+2026-11-03T05:21:11.3347515Z Updating files:  59% (622/1053)
+2026-11-03T05:21:11.3379181Z Updating files:  60% (632/1053)
+2026-11-03T05:21:11.3402987Z Updating files:  61% (643/1053)
+2026-11-03T05:21:11.3435624Z Updating files:  62% (653/1053)
+2026-11-03T05:21:11.3462668Z Updating files:  63% (664/1053)
+2026-11-03T05:21:11.3490933Z Updating files:  64% (674/1053)
+2026-11-03T05:21:11.3520272Z Updating files:  65% (685/1053)
+2026-11-03T05:21:11.3554817Z Updating files:  66% (695/1053)
+2026-11-03T05:21:11.3582233Z Updating files:  67% (706/1053)
+2026-11-03T05:21:11.3612159Z Updating files:  68% (717/1053)
+2026-11-03T05:21:11.3641336Z Updating files:  69% (727/1053)
+2026-11-03T05:21:11.3670116Z Updating files:  70% (738/1053)
+2026-11-03T05:21:11.3701729Z Updating files:  71% (748/1053)
+2026-11-03T05:21:11.3729058Z Updating files:  72% (759/1053)
+2026-11-03T05:21:11.3776811Z Updating files:  73% (769/1053)
+2026-11-03T05:21:11.3816087Z Updating files:  74% (780/1053)
+2026-11-03T05:21:11.3849200Z Updating files:  75% (790/1053)
+2026-11-03T05:21:11.3878590Z Updating files:  76% (801/1053)
+2026-11-03T05:21:11.3910043Z Updating files:  77% (811/1053)
+2026-11-03T05:21:11.3936527Z Updating files:  78% (822/1053)
+2026-11-03T05:21:11.3969891Z Updating files:  79% (832/1053)
+2026-11-03T05:21:11.3997611Z Updating files:  80% (843/1053)
+2026-11-03T05:21:11.4033237Z Updating files:  81% (853/1053)
+2026-11-03T05:21:11.4065656Z Updating files:  82% (864/1053)
+2026-11-03T05:21:11.4098507Z Updating files:  83% (874/1053)
+2026-11-03T05:21:11.4138122Z Updating files:  84% (885/1053)
+2026-11-03T05:21:11.4164808Z Updating files:  85% (896/1053)
+2026-11-03T05:21:11.4193778Z Updating files:  86% (906/1053)
+2026-11-03T05:21:11.4222307Z Updating files:  87% (917/1053)
+2026-11-03T05:21:11.4247551Z Updating files:  88% (927/1053)
+2026-11-03T05:21:11.4274901Z Updating files:  89% (938/1053)
+2026-11-03T05:21:11.4306022Z Updating files:  90% (948/1053)
+2026-11-03T05:21:11.4374471Z Updating files:  91% (959/1053)
+2026-11-03T05:21:11.4377615Z Updating files:  92% (969/1053)
+2026-11-03T05:21:11.4380417Z Updating files:  93% (980/1053)
+2026-11-03T05:21:11.4404200Z Updating files:  94% (990/1053)
+2026-11-03T05:21:11.4427957Z Updating files:  95% (1001/1053)
+2026-11-03T05:21:11.4490072Z Updating files:  96% (1011/1053)
+2026-11-03T05:21:11.4526574Z Updating files:  97% (1022/1053)
+2026-11-03T05:21:11.4577088Z Updating files:  98% (1032/1053)
+2026-11-03T05:21:11.4616254Z Updating files:  99% (1043/1053)
+2026-11-03T05:21:11.4616741Z Updating files: 100% (1053/1053)
+2026-11-03T05:21:11.4617103Z Updating files: 100% (1053/1053), done.
+2026-11-03T05:21:11.4756629Z Switched to a new branch 'main'
+2026-11-03T05:21:11.4779825Z branch 'main' set up to track 'origin/main'.
+2026-11-03T05:21:11.4972830Z ##[endgroup]
+2026-11-03T05:21:11.5466221Z [command]"C:\Program Files\Git\bin\git.exe" log -1 --format=%H
+2026-11-03T05:21:11.5823095Z 73ccc33dc500f7b9250b243015cc991f585050a4
+2026-11-03T05:21:11.6292458Z ##[group]Run actions/cache@v4
+2026-11-03T05:21:11.6292758Z with:
+2026-11-03T05:21:11.6292943Z   path: static_lib.7z
+2026-11-03T05:21:11.6293161Z   key: jark-static-lib-v2.0-2026-10
+2026-11-03T05:21:11.6293424Z   enableCrossOsArchive: false
+2026-11-03T05:21:11.6293668Z   fail-on-cache-miss: false
+2026-11-03T05:21:11.6293880Z   lookup-only: false
+2026-11-03T05:21:11.6294071Z   save-always: false
+2026-11-03T05:21:11.6294251Z ##[endgroup]
+2026-11-03T05:21:11.7602075Z (node:7396) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-11-03T05:21:11.7602943Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-11-03T05:21:12.1642263Z Cache hit for: jark-static-lib-v2.0-2026-10
+2026-11-03T05:21:12.1767321Z (node:7396) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+2026-11-03T05:21:13.4314471Z Received 25165824 of 265040448 (9.5%), 24.0 MBs/sec
+2026-11-03T05:21:14.4450085Z Received 163577856 of 265040448 (61.7%), 77.4 MBs/sec
+2026-11-03T05:21:15.2227572Z Received 265040448 of 265040448 (100.0%), 90.5 MBs/sec
+2026-11-03T05:21:15.2231917Z Cache Size: ~253 MB (265040448 B)
+2026-11-03T05:21:15.2331968Z [command]"C:\Program Files\Git\usr\bin\tar.exe" -xf D:/a/_temp/e524f6ee-9853-48bc-87f5-0614e11386c7/cache.tzst -P -C D:/a/JarkViewOpus/JarkViewOpus --force-local --use-compress-program "zstd -d"
+2026-11-03T05:21:15.7869621Z Cache restored successfully
+2026-11-03T05:21:15.8131293Z Cache restored from key: jark-static-lib-v2.0-2026-10
+2026-11-03T05:21:15.8454451Z ##[group]Run if (-not (Test-Path static_lib.7z)) {
+2026-11-03T05:21:15.8454925Z [36;1mif (-not (Test-Path static_lib.7z)) {[0m
+2026-11-03T05:21:15.8455265Z [36;1m  Write-Host "cache miss, downloading..."[0m
+2026-11-03T05:21:15.8455763Z [36;1m  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12[0m
+2026-11-03T05:21:15.8456791Z [36;1m  Invoke-WebRequest -Uri "https://github.com/jark006/JarkViewer/releases/download/static_lib/JarkViewer_static_lib_v2.0%2B.7z" -OutFile static_lib.7z -MaximumRetryCount 5 -RetryIntervalSec 10[0m
+2026-11-03T05:21:15.8457586Z [36;1m}[0m
+2026-11-03T05:21:15.8457834Z [36;1mGet-Item static_lib.7z | Select-Object Name, Length[0m
+2026-11-03T05:21:15.9257587Z shell: C:\Program Files\PowerShell\7\pwsh.EXE -command ". '{0}'"
+2026-11-03T05:21:15.9258367Z ##[endgroup]
+2026-11-03T05:21:16.5044694Z 
+2026-11-03T05:21:16.5068261Z [32;1mName         [0m[32;1m    Length[0m
+2026-11-03T05:21:16.5069440Z [32;1m----         [0m [32;1m   ------[0m
+2026-11-03T05:21:16.5070014Z static_lib.7z 265032797
+2026-11-03T05:21:16.5070578Z 
+2026-11-03T05:21:16.5713277Z ##[group]Run if not exist "C:\Program Files\7-Zip\7z.exe" (echo 7z not found & exit /b 1)
+2026-11-03T05:21:16.5713962Z [36;1mif not exist "C:\Program Files\7-Zip\7z.exe" (echo 7z not found & exit /b 1)[0m
+2026-11-03T05:21:16.5714662Z [36;1m"C:\Program Files\7-Zip\7z.exe" x static_lib.7z -ojark -y[0m
+2026-11-03T05:21:16.5715023Z [36;1mdir jark[0m
+2026-11-03T05:21:16.5746836Z shell: C:\Windows\system32\cmd.EXE /D /E:ON /V:OFF /S /C "CALL "{0}""
+2026-11-03T05:21:16.5747194Z ##[endgroup]
+2026-11-03T05:21:16.7909304Z 
+2026-11-03T05:21:16.7909934Z 7-Zip 26.05 (x64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-10-21
+2026-11-03T05:21:16.7910415Z 
+2026-11-03T05:21:16.7910563Z Scanning the drive for archives:
+2026-11-03T05:21:16.7910885Z 1 file, 265032797 bytes (253 MiB)
+2026-11-03T05:21:16.7911055Z 
+2026-11-03T05:21:16.7911154Z Extracting archive: static_lib.7z
+2026-11-03T05:21:21.7810099Z --
+2026-11-03T05:21:21.7810580Z Path = static_lib.7z
+2026-11-03T05:21:21.7811117Z Type = 7z
+2026-11-03T05:21:21.7811479Z Physical Size = 265032797
+2026-11-03T05:21:21.7811897Z Headers Size = 4096
+2026-11-03T05:21:21.7812255Z Method = LZMA2:27
+2026-11-03T05:21:21.7812613Z Solid = +
+2026-11-03T05:21:21.7812930Z Blocks = 1
+2026-11-03T05:21:21.7813120Z 
+2026-11-03T05:21:21.7864527Z Everything is Ok
+2026-11-03T05:21:21.7864878Z 
+2026-11-03T05:21:21.7865035Z Folders: 7
+2026-11-03T05:21:21.7865357Z Files: 203
+2026-11-03T05:21:21.7865817Z Size:       2787408100
+2026-11-03T05:21:21.7866084Z Compressed: 265032797
+2026-11-03T05:21:21.7893007Z  Volume in drive D is Temporary Storage
+2026-11-03T05:21:21.7893491Z  Volume Serial Number is 568B-2296
+2026-11-03T05:21:21.7893772Z 
+2026-11-03T05:21:21.7894004Z  Directory of D:\a\JarkViewOpus\JarkViewOpus\jark
+2026-11-03T05:21:21.7894382Z 
+2026-11-03T05:21:21.7894714Z 11/03/2026  05:21 AM    <DIR>          .
+2026-11-03T05:21:21.7896062Z 11/03/2026  05:21 AM    <DIR>          ..
+2026-11-03T05:21:21.7896721Z 11/03/2026  05:21 AM    <DIR>          include
+2026-11-03T05:21:21.7897441Z 10/09/2026  11:51 AM    <DIR>          lib
+2026-11-03T05:21:21.7897877Z 10/09/2026  11:51 AM    <DIR>          libavif
+2026-11-03T05:21:21.7898317Z 10/09/2026  11:51 AM    <DIR>          libexiv2
+2026-11-03T05:21:21.7898796Z 10/09/2026  11:51 AM    <DIR>          libffmpeg
+2026-11-03T05:21:21.7899353Z 10/09/2026  11:51 AM    <DIR>          libjxl
+2026-11-03T05:21:21.7899693Z 10/09/2026  11:51 AM    <DIR>          libopencv
+2026-11-03T05:21:21.7900013Z 10/09/2026  11:51 AM    <DIR>          libwebp2
+2026-11-03T05:21:21.7900301Z 11/03/2026  05:21 AM    <DIR>          src
+2026-11-03T05:21:21.7900691Z                0 File(s)              0 bytes
+2026-11-03T05:21:21.7901094Z               11 Dir(s)  154,384,248,832 bytes free
+2026-11-03T05:21:21.8076710Z ##[group]Run cmake -B build -A x64
+2026-11-03T05:21:21.8077081Z [36;1mcmake -B build -A x64[0m
+2026-11-03T05:21:21.8151737Z shell: C:\Program Files\PowerShell\7\pwsh.EXE -command ". '{0}'"
+2026-11-03T05:21:21.8152083Z ##[endgroup]
+2026-11-03T05:21:34.3979025Z -- Building for: Visual Studio 18 2026
+2026-11-03T05:21:34.3979517Z -- The CXX compiler identification is MSVC 19.51.36260.0
+2026-11-03T05:21:34.5395052Z -- Detecting CXX compiler ABI info
+2026-11-03T05:21:35.6188357Z -- Detecting CXX compiler ABI info - done
+2026-11-03T05:21:35.6504118Z -- Check for working CXX compiler: C:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe - skipped
+2026-11-03T05:21:35.6520375Z -- Detecting CXX compile features
+2026-11-03T05:21:35.6536070Z -- Detecting CXX compile features - done
+2026-11-03T05:21:35.7209395Z -- Configuring done (12.8s)
+2026-11-03T05:21:35.7476707Z -- Generating done (0.0s)
+2026-11-03T05:21:35.7487356Z -- Build files have been written to: D:/a/JarkViewOpus/JarkViewOpus/build
+2026-11-03T05:21:35.8791148Z ##[group]Run cmake --build build --config Release
+2026-11-03T05:21:35.8791613Z [36;1mcmake --build build --config Release[0m
+2026-11-03T05:21:35.8863575Z shell: C:\Program Files\PowerShell\7\pwsh.EXE -command ". '{0}'"
+2026-11-03T05:21:35.8863918Z ##[endgroup]
+2026-11-03T05:21:36.2909193Z MSBuild version 18.11.1-1.26513.3+940033be3 for .NET Framework
+2026-11-03T05:21:36.3286634Z 
+2026-11-03T05:21:36.6253012Z   1>Checking Build System
+2026-11-03T05:21:36.7787221Z   Building Custom Rule D:/a/JarkViewOpus/JarkViewOpus/CMakeLists.txt
+2026-11-03T05:21:36.9912171Z   JarkViewOpus.cpp
+2026-11-03T05:21:42.6885046Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:21:42.6915382Z   (compiling source file '../src/JarkViewOpus.cpp')
+2026-11-03T05:21:42.6916145Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:21:42.6917215Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:21:42.6917709Z   
+2026-11-03T05:21:46.2672808Z D:\a\JarkViewOpus\JarkViewOpus\src\JarkViewOpus.cpp(338,39): error C2027: use of undefined type 'jark::VideoSource' [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:21:46.2673804Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\jarkUtils.h(378,12):
+2026-11-03T05:21:46.2674245Z       see declaration of 'jark::VideoSource'
+2026-11-03T05:21:46.2674529Z   
+2026-11-03T05:21:46.2675368Z D:\a\JarkViewOpus\JarkViewOpus\src\JarkViewOpus.cpp(338,54): error C2039: 'data': is not a member of 'std::shared_ptr<jark::VideoSource>' [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:21:46.2676510Z       C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\14.51.36231\include\memory(1588,7):
+2026-11-03T05:21:46.2677168Z       see declaration of 'std::shared_ptr<jark::VideoSource>'
+2026-11-03T05:21:46.2677514Z   
+2026-11-03T05:21:46.2879151Z   JarkCore.cpp
+2026-11-03T05:21:48.4407077Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:21:48.4408667Z   (compiling source file '../src/JarkCore.cpp')
+2026-11-03T05:21:48.4409474Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:21:48.4410468Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:21:48.4411200Z   
+2026-11-03T05:21:53.1607189Z   ViewerWindow.cpp
+2026-11-03T05:21:55.3627024Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:21:55.3628109Z   (compiling source file '../src/ViewerWindow.cpp')
+2026-11-03T05:21:55.3628633Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:21:55.3629198Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:21:55.3629618Z   
+2026-11-03T05:22:00.1346055Z   ImageDatabase.cpp
+2026-11-03T05:22:01.9883038Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:22:01.9884526Z   (compiling source file '../jark/src/ImageDatabase.cpp')
+2026-11-03T05:22:01.9885221Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:22:01.9885957Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:22:01.9886526Z   
+2026-11-03T05:22:07.8313203Z   FormatSniffer.cpp
+2026-11-03T05:22:08.5830744Z   jarkUtils.cpp
+2026-11-03T05:22:10.4147774Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:22:10.4152951Z   (compiling source file '../jark/src/jarkUtils.cpp')
+2026-11-03T05:22:10.4153745Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:22:10.4154473Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:22:10.4155033Z   
+2026-11-03T05:22:14.4877019Z   exifParse.cpp
+2026-11-03T05:22:16.3148331Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:22:16.3150063Z   (compiling source file '../jark/src/exifParse.cpp')
+2026-11-03T05:22:16.3150903Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:22:16.3151848Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:22:16.3152546Z   
+2026-11-03T05:22:20.5661933Z   ColorManager.cpp
+2026-11-03T05:22:22.3728580Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:22:22.3730112Z   (compiling source file '../jark/src/ColorManager.cpp')
+2026-11-03T05:22:22.3730967Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:22:22.3731830Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:22:22.3732509Z   
+2026-11-03T05:22:26.4297551Z   Localization.cpp
+2026-11-03T05:22:28.2154062Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:22:28.2155344Z   (compiling source file '../jark/src/Localization.cpp')
+2026-11-03T05:22:28.2156009Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:22:28.2156672Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:22:28.2157228Z   
+2026-11-03T05:22:31.0874662Z   stringRes.cpp
+2026-11-03T05:22:32.8744708Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:22:32.8746254Z   (compiling source file '../jark/src/stringRes.cpp')
+2026-11-03T05:22:32.8747025Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:22:32.8747899Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:22:32.8748539Z   
+2026-11-03T05:22:35.9732347Z   MediaDecoder.cpp
+2026-11-03T05:22:38.6602136Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:22:38.6603559Z   (compiling source file '../jark/src/MediaDecoder.cpp')
+2026-11-03T05:22:38.6604139Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:22:38.6604811Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:22:38.6605281Z   
+2026-11-03T05:22:41.2450354Z   videoDecoder.cpp
+2026-11-03T05:22:43.0490067Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:22:43.0492150Z   (compiling source file '../jark/src/videoDecoder.cpp')
+2026-11-03T05:22:43.0493133Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:22:43.0494127Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:22:43.0494873Z   
+2026-11-03T05:22:46.3158136Z   MediaPlayer.cpp
+2026-11-03T05:22:49.0535473Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:22:49.0536794Z   (compiling source file '../jark/src/MediaPlayer.cpp')
+2026-11-03T05:22:49.0538239Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:22:49.0538818Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:22:49.0539206Z   
+2026-11-03T05:22:51.6661855Z   AudioOutput.cpp
+2026-11-03T05:22:53.4582997Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:22:53.4584534Z   (compiling source file '../jark/src/AudioOutput.cpp')
+2026-11-03T05:22:53.4585223Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:22:53.4586048Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:22:53.4586663Z   
+2026-11-03T05:22:57.3212731Z   AudioSpectrumAnalyzer.cpp
+2026-11-03T05:22:59.4548079Z   PsdDecoder.cpp
+2026-11-03T05:23:00.3771962Z   VectorImage.cpp
+2026-11-03T05:23:03.1406204Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:23:03.1407932Z   (compiling source file '../jark/src/VectorImage.cpp')
+2026-11-03T05:23:03.1408694Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:23:03.1409482Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:23:03.1410158Z   
+2026-11-03T05:23:05.5285502Z   blpDecoder.cpp
+2026-11-03T05:23:07.3749628Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:23:10.9269668Z   (compiling source file '../jark/src/blpDecoder.cpp')
+2026-11-03T05:23:10.9270550Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:23:10.9271432Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:23:10.9272183Z   
+2026-11-03T05:23:10.9272566Z   AiPrompt.cpp
+2026-11-03T05:23:12.9589548Z D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9): warning C4005: 'WIN32_LEAN_AND_MEAN': macro redefinition [D:\a\JarkViewOpus\JarkViewOpus\build\JarkViewOpus.vcxproj]
+2026-11-03T05:23:16.7857694Z   (compiling source file '../jark/src/AiPrompt.cpp')
+2026-11-03T05:23:16.7858457Z       D:\a\JarkViewOpus\JarkViewOpus\jark\include\framework.h(4,9):
+2026-11-03T05:23:16.7859263Z       'WIN32_LEAN_AND_MEAN' previously declared on the command line
+2026-11-03T05:23:16.7859903Z   
+2026-11-03T05:23:16.7860255Z   tinyxml2.cpp
+2026-11-03T05:23:16.9609431Z   Generating Code...
+2026-11-03T05:24:00.2409600Z ##[error]Process completed with exit code 1.
+2026-11-03T05:24:00.2697223Z Post job cleanup.
+2026-11-03T05:24:00.4664488Z [command]"C:\Program Files\Git\bin\git.exe" version
+2026-11-03T05:24:00.5043189Z git version 2.56.0.windows.4
+2026-11-03T05:24:00.5127869Z Temporarily overriding HOME='D:\a\_temp\0369d6a0-b080-4445-82b8-f4d0b48e7195' before making global git config changes
+2026-11-03T05:24:00.5129107Z Adding repository directory to the temporary git global config as a safe directory
+2026-11-03T05:24:00.5142578Z [command]"C:\Program Files\Git\bin\git.exe" config --global --add safe.directory D:\a\JarkViewOpus\JarkViewOpus
+2026-11-03T05:24:00.5592032Z [command]"C:\Program Files\Git\bin\git.exe" config --local --name-only --get-regexp core\.sshCommand
+2026-11-03T05:24:00.5995365Z [command]"C:\Program Files\Git\bin\git.exe" submodule foreach --recursive "sh -c \"git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :\""
+2026-11-03T05:24:01.1990514Z [command]"C:\Program Files\Git\bin\git.exe" config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-11-03T05:24:01.2383346Z http.https://github.com/.extraheader
+2026-11-03T05:24:01.2430669Z [command]"C:\Program Files\Git\bin\git.exe" config --local --unset-all http.https://github.com/.extraheader
+2026-11-03T05:24:01.2829291Z [command]"C:\Program Files\Git\bin\git.exe" submodule foreach --recursive "sh -c \"git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :\""
+2026-11-03T05:24:01.8500914Z [command]"C:\Program Files\Git\bin\git.exe" config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-11-03T05:24:01.8889793Z [command]"C:\Program Files\Git\bin\git.exe" submodule foreach --recursive "git config --local --show-origin --name-only --get-regexp remote.origin.url"
+2026-11-03T05:24:02.4681640Z Cleaning up orphan processes
+2026-11-03T05:24:02.4928267Z Terminate orphan process: pid (8720) (vctip)
+2026-11-03T05:24:02.5300117Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@v4, actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

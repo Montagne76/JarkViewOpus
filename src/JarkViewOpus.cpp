@@ -25,6 +25,7 @@
 
 #include "../jark/include/jarkUtils.h"
 #include "../jark/include/FormatSniffer.h"
+#include "../jark/include/MediaPlayer.h" // complete type of jark::VideoSource
 
 #include "JarkCore.h"
 #include "ViewerWindow.h"
