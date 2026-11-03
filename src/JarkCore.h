@@ -38,3 +38,8 @@ const cv::Mat& CurrentFrameOf(const ImageAsset& asset);
 //   maxDim     >0 downscales so the longest side fits maxDim
 HBITMAP MatToDIB(const cv::Mat& src, int rotation, bool premultiply, int maxDim,
                  LPSIZE outSize, bool* outHasAlpha);
+
+// Append one line to %TEMP%\JarkViewOpus.log. Cheap, thread-safe, and useful
+// because a viewer plugin has no other way to talk back while inside Opus.
+// Setting JVO_NOLOG=1 in the environment disables it.
+void JarkLog(const wchar_t* fmt, ...);

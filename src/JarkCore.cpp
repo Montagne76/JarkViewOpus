@@ -5,6 +5,8 @@
 #include "JarkCore.h"
 
 #include <algorithm>
+#include <cstdarg>
+#include <cstdio>
 #include <vector>
 
 #include "../jark/include/ImageDatabase.h"
@@ -145,6 +147,60 @@ std::shared_ptr<ImageAsset> JarkLoadAssetFromStream(LPSTREAM stream, const wchar
 bool IsAnimatedAsset(const ImageAsset& asset)
 {
     return asset.frames.size() > 1;
+}
+
+void JarkLog(const wchar_t* fmt, ...)
+{
+    static INIT_ONCE         once = INIT_ONCE_STATIC_INIT;
+    static CRITICAL_SECTION  cs;
+    static bool              enabled = true;
+
+    InitOnceExecuteOnce(&once, [](PINIT_ONCE, PVOID, PVOID*) -> BOOL {
+        InitializeCriticalSection(&cs);
+        wchar_t v[8] = {};
+        enabled = (GetEnvironmentVariableW(L"JVO_NOLOG", v, 8) == 0);
+        return TRUE;
+    }, nullptr, nullptr);
+    if (!enabled)
+        return;
+
+    wchar_t msg[1024] = {};
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnwprintf_s(msg, _countof(msg), _TRUNCATE, fmt, ap);
+    va_end(ap);
+
+    SYSTEMTIME st = {};
+    GetLocalTime(&st);
+
+    wchar_t dir[MAX_PATH] = {};
+    if (GetTempPathW(MAX_PATH, dir) == 0)
+        return;
+    const std::wstring file = std::wstring(dir) + L"JarkViewOpus.log";
+
+    wchar_t line[1200] = {};
+    const int chars = _snwprintf_s(line, _countof(line), _TRUNCATE,
+                                   L"%02u:%02u:%02u.%03u [%lu] %s\r\n",
+                                   st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                                   GetCurrentThreadId(), msg);
+
+    char utf8[2400] = {};
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, line, chars > 0 ? chars : 0,
+                                          utf8, sizeof(utf8) - 1, nullptr, nullptr);
+    if (bytes <= 0)
+        return;
+
+    EnterCriticalSection(&cs);
+    HANDLE h = CreateFileW(file.c_str(), FILE_APPEND_DATA,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        DWORD written = 0;
+        WriteFile(h, utf8, static_cast<DWORD>(bytes), &written, nullptr);
+        CloseHandle(h);
+    }
+    LeaveCriticalSection(&cs);
 }
 
 const cv::Mat& CurrentFrameOf(const ImageAsset& asset)

@@ -41,6 +41,7 @@ namespace
         SIZE                              size = { 0, 0 };  // after rotation
         HBITMAP                           bmp = nullptr;     // cached DIB for cur frame
         bool                              bmpHasAlpha = false;
+        int                               tickLog = 0;       // log the first few timer ticks only
     };
 
     CRITICAL_SECTION          g_listCs;
@@ -128,7 +129,10 @@ namespace
             return;
         }
         st->animating = true;
-        SetTimer(st->hwnd, kFrameTimer, static_cast<UINT>(DurationOf(st, st->cur)), nullptr);
+        const int ms = DurationOf(st, st->cur);
+        const UINT_PTR tok = SetTimer(st->hwnd, kFrameTimer, static_cast<UINT>(ms), nullptr);
+        JarkLog(L"ScheduleFrame: set timer %d ms -> %llu (hwnd=%p)", ms,
+                (unsigned long long)tok, (void*)st->hwnd);
     }
 
     void StopAnimation(ViewerState* st)
@@ -148,10 +152,17 @@ namespace
         st->durations.clear();
 
         if (!st->asset || st->asset->frames.empty())
+        {
+            JarkLog(L"SetAsset: empty asset for %s", path.c_str());
             return;
+        }
 
         st->durations.assign(st->asset->frameDurations.begin(), st->asset->frameDurations.end());
-        if (!EnsureBmp(st))
+        const bool dib = EnsureBmp(st);
+        JarkLog(L"SetAsset: %s frames=%zu durations=%zu dib=%d size=%dx%d",
+                path.c_str(), st->asset->frames.size(), st->durations.size(),
+                dib ? 1 : 0, st->size.cx, st->size.cy);
+        if (!dib)
             return;
 
         NotifySize(st->hwnd, st->size);
@@ -261,7 +272,7 @@ namespace
     {
         if (!info)
             return;
-        info->dwFlags = DVPFIF_CanReturnBitmap | DVPFIF_CanReturnViewer | DVPFIF_CanReturnThumbnail;
+        info->dwFlags = DVPFIF_CanReturnViewer | DVPFIF_CanReturnThumbnail;
         info->wMajorType = DVPMajorType_Image;
         info->wMinorType = 0;
         if (st && st->asset && !st->asset->frames.empty())
@@ -311,10 +322,12 @@ namespace
             CREATESTRUCTW* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
             ViewerState* state = static_cast<ViewerState*>(cs->lpCreateParams);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+            JarkLog(L"ViewerWnd: WM_NCCREATE hwnd=%p parent=%p", (void*)hwnd, (void*)cs->hwndParent);
             return TRUE;
         }
 
         case WM_CREATE:
+            JarkLog(L"ViewerWnd: WM_CREATE hwnd=%p", (void*)hwnd);
             return 0;
 
         case WM_SIZE:
@@ -336,6 +349,11 @@ namespace
                 if (st->asset && st->asset->frames.size() > 1)
                 {
                     st->cur = (st->cur + 1) % static_cast<int>(st->asset->frames.size());
+                    if (st->tickLog < 5)
+                    {
+                        JarkLog(L"WM_TIMER: frame -> %d/%zu", st->cur, st->asset->frames.size());
+                        ++st->tickLog;
+                    }
                     FreeBmp(st);
                     InvalidateRect(hwnd, nullptr, FALSE);
                     ScheduleFrame(st);
@@ -348,6 +366,7 @@ namespace
             return 0;
 
         case DVPLUGINMSG_LOADW:
+            JarkLog(L"ViewerWnd: LOADW %s", lParam ? reinterpret_cast<const wchar_t*>(lParam) : L"(null)");
             if (st)
                 OnLoad(hwnd, st, reinterpret_cast<const wchar_t*>(lParam), nullptr);
             return TRUE;

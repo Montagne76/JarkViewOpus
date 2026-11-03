@@ -112,9 +112,15 @@ static bool SniffSupported(const uint8_t* d, size_t n, const wchar_t* path)
 static void FillFileInfo(LPVIEWERPLUGINFILEINFOW lpVPFileInfo, const SIZE& size, bool animated,
                          bool hasAlpha)
 {
-    DWORD flags = DVPFIF_CanReturnBitmap | DVPFIF_CanReturnThumbnail;
+    // Animations must NOT advertise CanReturnBitmap: if both are offered Opus
+    // takes the cheap static path (DVP_LoadBitmapW) and never asks for a viewer
+    // window, so the animation would show frame 1 forever. The official gifanim
+    // plugin advertises CanReturnThumbnail|CanReturnViewer only, for this reason.
+    DWORD flags = DVPFIF_CanReturnThumbnail;
     if (animated)
         flags |= DVPFIF_CanReturnViewer;
+    else
+        flags |= DVPFIF_CanReturnBitmap;
     if (hasAlpha)
         flags |= DVPFIF_HasAlphaChannel;
 
@@ -229,19 +235,32 @@ __declspec(dllexport) BOOL DVP_IdentifyFileW(HWND /*hWnd*/, LPWSTR lpszName,
     uint8_t header[96] = {};
     size_t got = 0;
     if (!ReadHeader(lpszName, header, sizeof(header), &got))
+    {
+        JarkLog(L"IdentifyFileW: cannot read header (%s)", lpszName);
         return FALSE;
+    }
     if (!SniffSupported(header, got, lpszName))
+    {
+        JarkLog(L"IdentifyFileW: sniff rejected (%s)", lpszName);
         return FALSE;
+    }
 
     auto asset = JarkLoadAsset(lpszName);
     if (!asset)
+    {
+        JarkLog(L"IdentifyFileW: decode failed (%s)", lpszName);
         return FALSE;
+    }
 
     const cv::Mat& m = CurrentFrameOf(*asset);
     if (m.empty())
         return FALSE;
 
-    FillFileInfo(lpVPFileInfo, SIZE{ m.cols, m.rows }, IsAnimatedAsset(*asset), m.channels() == 4);
+    const bool animated = IsAnimatedAsset(*asset);
+    FillFileInfo(lpVPFileInfo, SIZE{ m.cols, m.rows }, animated, m.channels() == 4);
+    JarkLog(L"IdentifyFileW: OK %s frames=%zu durations=%zu size=%dx%d animated=%d flags=0x%08X",
+            lpszName, asset->frames.size(), asset->frameDurations.size(),
+            m.cols, m.rows, animated ? 1 : 0, lpVPFileInfo->dwFlags);
     return TRUE;
 }
 
@@ -293,6 +312,9 @@ __declspec(dllexport) HBITMAP DVP_LoadBitmapW(HWND /*hWnd*/, LPWSTR lpszName,
     if (!hbmp)
         return nullptr;
 
+    JarkLog(L"LoadBitmapW: %s %dx%d (frames=%zu)", lpszName, sz.cx, sz.cy,
+            asset->frames.size());
+
     if (lpVPFileInfo && alpha)
         lpVPFileInfo->dwFlags |= DVPFIF_HasAlphaChannel;
     if (lpszSize)
@@ -331,7 +353,12 @@ __declspec(dllexport) HWND DVP_CreateViewer(HWND hWnd, LPRECT lpRc, DWORD dwFlag
 {
     if (g_refCount == 0)
         return nullptr;
-    return JarkViewerCreate(hWnd, lpRc, dwFlags);
+    HWND h = JarkViewerCreate(hWnd, lpRc, dwFlags);
+    JarkLog(L"CreateViewer: parent=%p rect=(%ld,%ld,%ld,%ld) flags=0x%lX -> %p",
+            (void*)hWnd, lpRc ? lpRc->left : 0, lpRc ? lpRc->top : 0,
+            lpRc ? lpRc->right : 0, lpRc ? lpRc->bottom : 0,
+            (unsigned long)dwFlags, (void*)h);
+    return h;
 }
 
 } // extern "C"
